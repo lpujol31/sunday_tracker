@@ -48,6 +48,12 @@ dependencies:
   # Empêche le téléphone de se mettre en veille pendant un ride
   wakelock_plus: ^1.2.5
 
+  # Service en arrière-plan / foreground service Android
+  flutter_background_service: ^5.0.10
+
+  # Notifications locales Android pour afficher la notification persistante
+  flutter_local_notifications: ^17.2.4
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

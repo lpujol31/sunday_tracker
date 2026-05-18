@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'services/background_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -8,6 +9,7 @@ void main() async {
   await Hive.initFlutter();
 
   await Hive.openBox('rides');
+  await initializeBackgroundService();
 
   runApp(const SundayTrackerApp());
 }

@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'dart:async';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
 class RideScreen extends StatefulWidget {
   const RideScreen({super.key});
@@ -40,25 +41,35 @@ class _RideScreenState extends State<RideScreen> {
   bool rideIsPaused = false;
 
   @override
-  void initState() 
-  {
-    super.initState();
+void initState() {
+  super.initState();
 
-    WakelockPlus.enable();
+  WakelockPlus.enable();
 
-    rideStartTime = DateTime.now();
+  startForegroundService();
 
-    rideTimer = Timer.periodic(
-      const Duration(seconds: 1),
-      (timer) {
-        setState(() {
-          rideDuration = DateTime.now().difference(rideStartTime!);
-        });
-      },
-    );
+  rideStartTime = DateTime.now();
 
-    startTracking();
-  }
+  rideTimer = Timer.periodic(
+    const Duration(seconds: 1),
+    (timer) {
+      setState(() {
+        rideDuration = DateTime.now().difference(rideStartTime!);
+      });
+    },
+  );
+
+  startTracking();
+}
+
+Future<void> startForegroundService() async {
+  print('START FOREGROUND SERVICE');
+
+  final serviceStarted =
+      await FlutterBackgroundService().startService();
+
+  print('SERVICE STARTED: $serviceStarted');
+}
 
   @override
   void dispose() 
@@ -66,6 +77,7 @@ class _RideScreenState extends State<RideScreen> {
     positionStream?.cancel();
     rideTimer?.cancel();
     WakelockPlus.disable();
+    FlutterBackgroundService().invoke('stopService');
     super.dispose();
   }
 
