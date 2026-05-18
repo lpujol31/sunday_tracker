@@ -21,6 +21,11 @@ class _RideScreenState extends State<RideScreen> {
   final MapController mapController = MapController();
   bool mapReady = false;
   final List<LatLng> ridePoints = [];
+  
+  double totalDistance = 0;
+  final Distance distanceCalculator = const Distance();
+
+  String accuracy='0';
 
   @override
   void initState() {
@@ -37,7 +42,7 @@ class _RideScreenState extends State<RideScreen> {
     super.dispose();
   }
 
- Future<void> startTracking() async {
+  Future<void> startTracking() async {
 
   LocationPermission permission;
 
@@ -53,11 +58,28 @@ class _RideScreenState extends State<RideScreen> {
       distanceFilter: 5,
     ),
   ).listen((Position position) {
+    if (ridePoints.isNotEmpty) {
+
+      final lastPoint = ridePoints.last;
+
+      final newPoint = LatLng(
+        position.latitude,
+        position.longitude,
+      );
+
+      totalDistance += distanceCalculator.as(
+        LengthUnit.Meter,
+        lastPoint,
+        newPoint,
+      );
+
+    }
 
     setState(() {
       latitude = position.latitude.toString();
       longitude = position.longitude.toString();
       altitude = position.altitude.toStringAsFixed(1);
+      accuracy = position.accuracy.toStringAsFixed(1);
 print('ALTITUDE: ${position.altitude}');
 print('ACCURACY: ${position.accuracy}');
 print('SPEED: ${position.speed}');
@@ -75,6 +97,48 @@ HapticFeedback.mediumImpact();
     );
   });
 }
+
+void initRideInfos() {
+    ridePoints.clear();
+    totalDistance = 0;
+  }
+
+  String formattedDistance() {
+
+    if (totalDistance < 1000) {
+      return '${totalDistance.toStringAsFixed(0)} m';
+    }
+
+    return '${(totalDistance / 1000).toStringAsFixed(2)} km';
+  }
+
+  Color accuracyColor() {
+    final value = double.tryParse(accuracy) ?? 999;
+
+    if (value <= 5) {
+      return Colors.green;
+    }
+
+    if (value <= 15) {
+      return Colors.orange;
+    }
+
+    return Colors.red;
+  }
+
+  String accuracyLabel() {
+    final value = double.tryParse(accuracy) ?? 999;
+
+    if (value <= 5) {
+      return 'Excellent';
+    }
+
+    if (value <= 15) {
+      return 'Moyen';
+    }
+
+    return 'Faible';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -155,100 +219,286 @@ HapticFeedback.mediumImpact();
             ),
           ),
 
-            const SizedBox(height: 20),
+          const SizedBox(height: 20),
 
-            // GPS INFO
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(20),
-
-              decoration: BoxDecoration(
-                color: const Color(0xFF1B1B1B),
-                borderRadius: BorderRadius.circular(20),
-              ),
-
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-
-                  const Text(
-                    'GPS Position',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  Text(
-                    'Latitude: $latitude',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  Text(
-                    'Longitude: $longitude',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  Text(
-                    'Altitude: $altitude',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ],
-              ),
-            ),
-
-            const Spacer(),
-
-            // BUTTONS
-            Row(
+          // GPS + DISTANCE + PRECISION
+          IntrinsicHeight(
+            child: Row(
               children: [
 
+                // GPS CARD
                 Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey[850],
-                      padding: const EdgeInsets.symmetric(vertical: 18),
+                  flex: 5,
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1B1B1B),
+                      borderRadius: BorderRadius.circular(20),
                     ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
 
-                    onPressed: () {
-                      Navigator.pop(context);
-                    },
+                        Row(
+                          children: const [
+                            Icon(
+                              Icons.gps_fixed,
+                              color: Colors.lightBlue,
+                              size: 24,
+                            ),
+                            SizedBox(width: 5),
+                            Text(
+                              'Position GPS',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
 
-                    child: const Text(
-                      'Stop Ride',
-                      style: TextStyle(fontSize: 18),
+                        const SizedBox(height: 10),
+
+                        Row(
+                          children: [
+                            const Icon(Icons.public, color: Colors.lightBlue, size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Lat. : $latitude',
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        Row(
+                          children: [
+                            const Icon(Icons.language, color: Colors.lightBlue, size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Long. : $longitude',
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        Row(
+                          children: [
+                            const Icon(Icons.terrain, color: Colors.lightBlue, size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Alt. : $altitude m',
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
 
-                const SizedBox(width: 16),
+                const SizedBox(width: 12),
 
+                // RIGHT COLUMN
                 Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      padding: const EdgeInsets.symmetric(vertical: 18),
-                    ),
+                  flex: 4,
+                  child: Column(
+                    children: [
 
-                    onPressed: () {},
+                      // DISTANCE CARD
+                      Expanded(
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1B1B1B),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
 
-                    child: const Text(
-                      'SOS',
-                      style: TextStyle(fontSize: 18),
-                    ),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(
+                                      Icons.route,
+                                      color: Colors.orange,
+                                      size: 24,
+                                    ),
+                                    SizedBox(width: 6),
+                                    Text(
+                                      'Distance',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                              const SizedBox(height: 10),
+
+                              Text(
+                                formattedDistance(),
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.orange,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 10),
+
+                      // GPS ACCURACY CARD
+                      Expanded(
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1B1B1B),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(
+                                      Icons.satellite_alt,
+                                      color: Colors.lightBlue,
+                                      size: 24,
+                                    ),
+                                    SizedBox(width: 6),
+                                    Text(
+                                      'Précision',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                              const SizedBox(height: 10),
+
+                              Text(
+                                '$accuracy m',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                  color: accuracyColor(),
+                                ),
+                              ),
+
+                              const SizedBox(height: 4),
+
+                              Text(
+                                accuracyLabel(),
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: accuracyColor(),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
-          ],
-        ),
+          ),
+
+          const Spacer(),
+
+          // BUTTONS
+          Row(
+            children: [
+
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[850],
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+
+                  onPressed: () {
+                    Navigator.pop(context);
+                  },
+
+                  child: const Text(
+                    'Stop Ride',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+
+              const SizedBox(width: 16),
+
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+
+                  onPressed: () {
+                    initRideInfos();
+                  },
+
+                  child: const Text(
+                    'INIT',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+
+
+              const SizedBox(width: 16),
+
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+
+                  onPressed: () {},
+
+                  child: const Text(
+                    'SOS',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
-    );
+    ),
+  );
   }
 }
