@@ -30,9 +30,23 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # GPS / géolocalisation temps réel
   geolocator: ^12.0.0
+
+  # Affichage de la carte OpenStreetMap
   flutter_map: ^7.0.2
+
+  # Gestion des coordonnées GPS et calculs de distance
   latlong2: ^0.9.1
+
+  # Base de données locale légère
+  hive: ^2.2.3
+
+  # Intégration Hive spécifique Flutter
+  hive_flutter: ^1.1.0
+
+  # Empêche le téléphone de se mettre en veille pendant un ride
+  wakelock_plus: ^1.2.5
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
