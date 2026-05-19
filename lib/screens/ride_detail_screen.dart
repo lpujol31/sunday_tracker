@@ -59,23 +59,23 @@ class RideDetailScreen extends StatelessWidget {
                     final mapController =
                         MapController();
 
-                    WidgetsBinding.instance
-                        .addPostFrameCallback((_) {
-
+                    WidgetsBinding.instance.addPostFrameCallback((_) async {
                       if (ridePoints.isEmpty) {
                         return;
                       }
 
-                      final bounds =
-                          LatLngBounds.fromPoints(
+                      await Future.delayed(
+                        const Duration(milliseconds: 300),
+                      );
+
+                      final bounds = LatLngBounds.fromPoints(
                         ridePoints,
                       );
 
                       mapController.fitCamera(
                         CameraFit.bounds(
                           bounds: bounds,
-                          padding:
-                              const EdgeInsets.all(40),
+                          padding: const EdgeInsets.all(60),
                         ),
                       );
                     });
@@ -114,22 +114,40 @@ class RideDetailScreen extends StatelessWidget {
                           MarkerLayer(
                             markers: [
 
+                              // POINTS INTERMEDIAIRES
+                              ...ridePoints
+                                  .skip(1)
+                                  .take(ridePoints.length - 2)
+                                  .map(
+                                    (point) => Marker(
+                                      point: point,
+                                      width: 10,
+                                      height: 10,
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.orange,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.white,
+                                            width: 1,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+
                               // START
                               Marker(
                                 point: ridePoints.first,
-
-                                width: 16,
-                                height: 16,
-
+                                width: 22,
+                                height: 22,
                                 child: Container(
-                                  decoration:
-                                      BoxDecoration(
+                                  decoration: BoxDecoration(
                                     color: Colors.green,
                                     shape: BoxShape.circle,
-
                                     border: Border.all(
                                       color: Colors.white,
-                                      width: 2,
+                                      width: 3,
                                     ),
                                   ),
                                 ),
@@ -138,19 +156,15 @@ class RideDetailScreen extends StatelessWidget {
                               // END
                               Marker(
                                 point: ridePoints.last,
-
-                                width: 16,
-                                height: 16,
-
+                                width: 22,
+                                height: 22,
                                 child: Container(
-                                  decoration:
-                                      BoxDecoration(
+                                  decoration: BoxDecoration(
                                     color: Colors.red,
                                     shape: BoxShape.circle,
-
                                     border: Border.all(
                                       color: Colors.white,
-                                      width: 2,
+                                      width: 3,
                                     ),
                                   ),
                                 ),

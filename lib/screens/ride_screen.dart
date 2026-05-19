@@ -4,10 +4,12 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'dart:async';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:math';
 
 class RideScreen extends StatefulWidget {
   const RideScreen({super.key});
@@ -40,6 +42,13 @@ class _RideScreenState extends State<RideScreen> {
   // RIDE : état
   bool rideIsPaused = false;
 
+  String? safetySessionId;
+  String? safetyShareCode;
+
+  Timer? safetyUploadTimer;
+
+  Position? currentPosition;
+
   @override
 void initState() {
   super.initState();
@@ -47,6 +56,7 @@ void initState() {
   WakelockPlus.enable();
 
   startForegroundService();
+  createSafetySession();
 
   rideStartTime = DateTime.now();
 
@@ -78,7 +88,82 @@ Future<void> startForegroundService() async {
     rideTimer?.cancel();
     WakelockPlus.disable();
     FlutterBackgroundService().invoke('stopService');
+    safetyUploadTimer?.cancel();
     super.dispose();
+  }
+
+  String generateShareCode() 
+  {
+    const chars =
+        'abcdefghijklmnopqrstuvwxyz0123456789';
+
+    final random = Random();
+
+    return String.fromCharCodes(
+      Iterable.generate(
+        8,
+        (_) => chars.codeUnitAt(
+          random.nextInt(chars.length),
+        ),
+      ),
+    );
+  }
+
+  Future<void> uploadSafetyPosition() async 
+  {
+    if (safetySessionId == null ||
+        currentPosition == null) {
+      return;
+    }
+
+    final supabase = Supabase.instance.client;
+
+    await supabase
+        .from('safety_positions')
+        .insert({
+          'session_id': safetySessionId,
+          'latitude': currentPosition!.latitude,
+          'longitude': currentPosition!.longitude,
+        });
+
+    print('SAFETY POSITION UPLOADED');
+  }
+
+  void startSafetyUploadTimer() 
+  {
+    safetyUploadTimer = Timer.periodic(
+    const Duration(seconds: 30),
+    (timer) async {
+      await uploadSafetyPosition();
+    },
+    );
+  }
+
+  Future<void> createSafetySession() async 
+  {
+    final supabase = Supabase.instance.client;
+
+    final shareCode = generateShareCode();
+
+    final response = await supabase
+        .from('safety_sessions')
+        .insert({
+          'share_code': shareCode,
+        })
+        .select()
+        .single();
+
+    safetySessionId = response['id'];
+    safetyShareCode = shareCode;
+
+    print(
+      'SAFETY SESSION CREATED: $safetySessionId',
+    );
+
+    print(
+      'SHARE CODE: $safetyShareCode',
+    );
+    startSafetyUploadTimer();
   }
 
   Future<void> togglePauseRide() async {
@@ -111,14 +196,20 @@ Future<void> startForegroundService() async {
     });
   }
 
-  Future<void> saveRide() async {
+  Future<void> saveRide() async 
+  {
     final box = await Hive.openBox('rides');
+
+    final locationTags = await getRideLocationTags();
 
     final ride = {
       'startTime': rideStartTime?.toIso8601String(),
       'endTime': DateTime.now().toIso8601String(),
       'durationSeconds': rideDuration.inSeconds,
       'distanceMeters': totalDistance,
+      'city': locationTags['city'],
+      'department': locationTags['department'],
+      'region': locationTags['region'],
       'points': ridePoints
           .map((point) => {
                 'lat': point.latitude,
@@ -150,7 +241,9 @@ Future<void> startForegroundService() async {
     ),
   ).listen((Position position) {
     if (ridePoints.isNotEmpty) {
-
+      
+      currentPosition = position;
+      
       final lastPoint = ridePoints.last;
 
       final newPoint = LatLng(
@@ -193,6 +286,51 @@ HapticFeedback.mediumImpact();
   {
       ridePoints.clear();
       totalDistance = 0;
+  }
+
+
+  Future<Map<String, String>> getRideLocationTags() async 
+  {
+    if (ridePoints.isEmpty) {
+      return {
+        'city': '',
+        'department': '',
+        'region': '',
+      };
+    }
+
+    final startPoint = ridePoints.first;
+
+    try {
+      final placemarks = await placemarkFromCoordinates(
+        startPoint.latitude,
+        startPoint.longitude,
+      );
+
+      if (placemarks.isEmpty) {
+        return {
+          'city': '',
+          'department': '',
+          'region': '',
+        };
+      }
+
+      final place = placemarks.first;
+
+      return {
+        'city': place.locality ?? '',
+        'department': place.subAdministrativeArea ?? '',
+        'region': place.administrativeArea ?? '',
+      };
+    } catch (e) {
+      print('Erreur reverse geocoding : $e');
+
+      return {
+        'city': '',
+        'department': '',
+        'region': '',
+      };
+    }
   }
 
   // Formatage de données

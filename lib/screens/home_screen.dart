@@ -1,13 +1,88 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
+import '../widgets/ride_trace_thumbnail.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget 
+{
   const HomeScreen({super.key});
 
-  String formatDistance(dynamic meters) {
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> 
+{
+  String appVersion = '';
+
+  @override
+  void initState() {
+    super.initState();
+    loadAppVersion();
+  }
+
+  // FORMATAGE DE DONNEES
+  Widget buildTag(String text) 
+  {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.orange.withOpacity(0.3),
+        ),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.orange,
+          fontSize: 9,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  Future<void> loadAppVersion() async {Widget buildTag(String text) 
+  {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.orange.withOpacity(0.3),
+        ),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.orange,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+    final packageInfo = await PackageInfo.fromPlatform();
+
+    setState(() {
+      appVersion = 'v${packageInfo.version}+${packageInfo.buildNumber}';
+    });
+  }
+
+  String formatDistance(dynamic meters) 
+  {
     final distance = (meters ?? 0).toDouble();
 
     if (distance < 1000) {
@@ -17,13 +92,15 @@ class HomeScreen extends StatelessWidget {
     return '${(distance / 1000).toStringAsFixed(2)} km';
   }
 
-  String formatDuration(dynamic seconds) {
+  String formatDuration(dynamic seconds) 
+  {
     final duration = Duration(seconds: seconds ?? 0);
     return duration.toString().split('.').first;
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) 
+  {
     final ridesBox = Hive.box('rides');
 
     return Scaffold(
@@ -55,8 +132,7 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 28),
-
+            const SizedBox(height: 20),
             const Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -69,7 +145,6 @@ class HomeScreen extends StatelessWidget {
             ),
 
             const SizedBox(height: 16),
-
             Expanded(
               child: ValueListenableBuilder(
                 valueListenable: ridesBox.listenable(),
@@ -95,8 +170,12 @@ class HomeScreen extends StatelessWidget {
                     final rideA = a['ride'] as Map;
                     final rideB = b['ride'] as Map;
 
-                    final dateA = DateTime.tryParse(rideA['startTime'] ?? '') ?? DateTime(1900);
-                    final dateB = DateTime.tryParse(rideB['startTime'] ?? '') ?? DateTime(1900);
+                    final dateA =
+                        DateTime.tryParse(rideA['startTime'] ?? '') ??
+                            DateTime(1900);
+                    final dateB =
+                        DateTime.tryParse(rideB['startTime'] ?? '') ??
+                            DateTime(1900);
 
                     return dateB.compareTo(dateA);
                   });
@@ -109,7 +188,8 @@ class HomeScreen extends StatelessWidget {
                       final ride = item['ride'] as Map;
 
                       final startDate =
-                          DateTime.tryParse(ride['startTime'] ?? '') ?? DateTime.now();
+                          DateTime.tryParse(ride['startTime'] ?? '') ??
+                              DateTime.now();
 
                       final formattedDate =
                           '${startDate.day.toString().padLeft(2, '0')}/'
@@ -145,14 +225,16 @@ class HomeScreen extends StatelessWidget {
                                 ),
                                 actions: [
                                   TextButton(
-                                    onPressed: () => Navigator.pop(context, false),
+                                    onPressed: () =>
+                                        Navigator.pop(context, false),
                                     child: const Text('Annuler'),
                                   ),
                                   ElevatedButton(
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: Colors.red,
                                     ),
-                                    onPressed: () => Navigator.pop(context, true),
+                                    onPressed: () =>
+                                        Navigator.pop(context, true),
                                     child: const Text('Supprimer'),
                                   ),
                                 ],
@@ -165,70 +247,145 @@ class HomeScreen extends StatelessWidget {
                         },
                         child: GestureDetector(
                           onTap: () {
-
                             Navigator.push(
                               context,
-
                               MaterialPageRoute(
-                                builder: (context) =>
-                                    RideDetailScreen(
-                                      ride: ride,
-                                    ),
+                                builder: (context) => RideDetailScreen(
+                                  ride: ride,
+                                ),
                               ),
                             );
                           },
-                        child: Container(
-                          margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1B1B1B),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(
-                                Icons.route,
-                                color: Colors.orange,
-                                size: 30,
-                              ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: Column(
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1B1B1B),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+
+                                Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(
-                                      formattedDate,
-                                      style: const TextStyle(
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.bold,
+
+                                    RideTraceThumbnail(
+                                      points: ride['points'] ?? [],
+                                    ),
+
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+
+                                          Text(
+                                            'Sortie du $formattedDate',
+                                            style: const TextStyle(
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+
+                                          const SizedBox(height: 5),
+                                          Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.timer,
+                                                size: 16,
+                                                color: Colors.white60,
+                                              ),
+
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                formatDuration(
+                                                  ride['durationSeconds'],
+                                                ),
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                ),
+                                              ),
+
+                                              const SizedBox(width: 4),
+                                              const Icon(
+                                                Icons.route,
+                                                size: 16,
+                                                color: Colors.white60,
+                                              ),
+
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                formatDistance(
+                                                  ride['distanceMeters'],
+                                                ),
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      formatDistance(ride['distanceMeters']),
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        color: Colors.white70,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      formatDuration(ride['durationSeconds']),
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                      ),
+
+                                    const SizedBox(width: 5),
+                                    const Icon(
+                                      Icons.chevron_right,
+                                      color: Colors.orange,
+                                      size: 30,
                                     ),
                                   ],
                                 ),
-                              ),
-                            ],
+
+                                const SizedBox(height: 14),
+
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+
+                                    if ((ride['department'] ?? '')
+                                        .toString()
+                                        .isNotEmpty)
+                                      buildTag(
+                                        '#${ride['department']}',
+                                      ),
+
+                                    if ((ride['region'] ?? '')
+                                        .toString()
+                                        .isNotEmpty)
+                                      buildTag(
+                                        '#${ride['region']}',
+                                      ),
+
+                                    if ((ride['city'] ?? '')
+                                        .toString()
+                                        .isNotEmpty)
+                                      buildTag(
+                                        '#${ride['city']}',
+                                      ),
+                                  ],
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
                         ),
                       );
                     },
                   );
                 },
+              ),
+            ),
+
+            const SizedBox(height: 8),
+            Text(
+              appVersion,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.white38,
               ),
             ),
           ],
