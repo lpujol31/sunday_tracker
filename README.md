@@ -1,12 +1,12 @@
-* Logo appli *
+* Logo appli
 
 
-* Accueil *
+* Accueil
 
 Version / date & heure
 
 
-* Ride in progress * 
+* Ride in progress
 Gèrer flèche retour
 Comparer Distance avec montre GPS
 
@@ -16,7 +16,7 @@ Avoir une zone de message au dessus des boutons
 Blinder bouton Reset ?
 
 
-* Détail sortie *
+* Détail sortie
 Supprimer
 Partager
 Détails
