@@ -1,4 +1,4 @@
-# sunday_tracker_live
+# sunday_tracker
 
 A new Flutter project.
 
