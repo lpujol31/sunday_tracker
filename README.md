@@ -1,36 +1,33 @@
 # sunday_tracker
 
-A new Flutter project.
+## Backlog
+### v1
+Logo appli
 
-## Getting Started
-* Logo appli
-
-
-* Accueil
-v1
+#### Accueil
 Version / date & heure
 hashtag en minuscule
 
-v2
-Preview avec fond de carte
-
-* Ride in progress
+#### Ride in progress
 Gèrer flèche retour
 Comparer Distance avec montre GPS
-Gérer bouton SOS
 Gérer bouton Start/stop/démarrage chrono
 Avoir une zone de message au dessus des boutons
-Blinder bouton Reset ?
+Blinder bouton Reset 
 
-
-* Détail sortie
-v1
+#### Détail sortie
 Supprimer (+ données associées supabase)
 Zoom/dézoom VS rotation
 Icone Départ/arrivée
 
-v2
+### v2
+#### Accueil
+Preview avec fond de carte
+
+#### Ride in progress
+Gérer bouton SOS
+
+#### Détail sortie
 Partager
 Exporter GPX
 Détails
-
