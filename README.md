@@ -1,3 +1,8 @@
+# sunday_tracker_live
+
+A new Flutter project.
+
+## Getting Started
 * Logo appli
 
 
