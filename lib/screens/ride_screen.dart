@@ -286,14 +286,13 @@ class _RideScreenState extends State<RideScreen> {
                 alignment: Alignment.centerRight,
                 child: TextButton(
                   onPressed: () async {
-                    Navigator.pop(context);
+                    Navigator.pop(context); // ferme la modal
 
-                    /// TODO :
-                    /// stop tracking
-                    /// delete local ride
-                    /// delete supabase ride
+                    await cancelRide();
 
-                    Navigator.pop(context);
+                    if (!mounted) return;
+
+                    Navigator.pop(context); // retour accueil
                   },
                   child: const Text(
                     'Terminer sans sauvegarder',
@@ -312,16 +311,16 @@ class _RideScreenState extends State<RideScreen> {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
+                onPressed: () async {
+                  Navigator.pop(context); // ferme la modal
 
-                    /// TODO :
-                    /// save ride
-                    /// stop tracking
+                  await saveRide();
 
-                    Navigator.pop(context);
-                  },
-                  style: ElevatedButton.styleFrom(
+                  if (!mounted) return;
+
+                  Navigator.pop(context); // retour accueil
+                },
+                    style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFFF5A4F),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 18),
@@ -346,53 +345,6 @@ class _RideScreenState extends State<RideScreen> {
       },
     );
   }
-
-  Future<void> showExitRideDialog() async {
-  final result = await showDialog<String>(
-    context: context,
-    builder: (context) {
-      return AlertDialog(
-        backgroundColor: const Color(0xFF1B1B1B),
-        title: const Text('Quitter la sortie'),
-        content: const Text(
-          'Que souhaitez-vous faire avec cette sortie ?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'continue'),
-            child: const Text('Continuer'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'discard'),
-            child: const Text(
-              'Annuler la sortie',
-              style: TextStyle(color: Colors.orange),
-            ),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-            ),
-            onPressed: () => Navigator.pop(context, 'save'),
-            child: const Text('Sauvegarder'),
-          ),
-        ],
-      );
-    },
-  );
-
-  if (result == 'save') {
-    await saveRide();
-    if (!mounted) return;
-    Navigator.pop(context);
-  }
-
-  if (result == 'discard') {
-    await cancelRide();
-    if (!mounted) return;
-    Navigator.pop(context);
-  }
-}
 
   Future<void> cancelRide() async {
     safetyUploadTimer?.cancel();
