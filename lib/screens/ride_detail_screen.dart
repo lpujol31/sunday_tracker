@@ -3,13 +3,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 class RideDetailScreen extends StatelessWidget {
 
   final Map ride;
+  final dynamic rideKey;
 
   const RideDetailScreen({
     super.key,
     required this.ride,
+    required this.rideKey,
   });
 
   @override
@@ -136,40 +141,82 @@ class RideDetailScreen extends StatelessWidget {
                                     ),
                                   ),
 
-                              // START
-                              Marker(
-                                point: ridePoints.first,
-                                width: 22,
-                                height: 22,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.green,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 3,
-                                    ),
-                                  ),
-                                ),
-                              ),
+                                  // START
+                                  Marker(
+                                    point: ridePoints.first,
 
-                              // END
-                              Marker(
-                                point: ridePoints.last,
-                                width: 22,
-                                height: 22,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.red,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 3,
+                                    width: 22,
+                                    height: 22,
+
+                                    child: Container(
+
+                                      decoration: BoxDecoration(
+
+                                        color: Colors.black.withValues(
+                                          alpha: 0.25,
+                                        ),
+
+
+                                        shape: BoxShape.circle,
+
+                                        border: Border.all(
+                                          color: Colors.white,
+                                          width: 2,
+                                        ),
+
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.greenAccent.withValues(
+                                              alpha: 0.85,
+                                            ),
+                                            blurRadius: 8,
+                                          ),
+                                        ],
+                                      ),
+
+                                      
                                     ),
                                   ),
-                                ),
-                              ),
-                            ],
+                                  // END
+                                  Marker(
+                                    point: ridePoints.last,
+
+                                    width: 32,
+                                    height: 32,
+
+                                    child: Container(
+
+                                      decoration: BoxDecoration(
+
+                                        color: Colors.black.withValues(
+                                          alpha: 0.25,
+                                        ),
+
+                                        shape: BoxShape.circle,
+
+                                        border: Border.all(
+                                          color: Colors.white,
+                                          width: 2,
+                                        ),
+
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.red.withValues(
+                                              alpha: 0.85,
+                                            ),
+                                            blurRadius: 8,
+                                          ),
+                                        ],
+                                      ),
+
+                                      child: const Icon(
+                                        Icons.sports_score_sharp,
+                                        color: Colors.white,
+                                        size: 28,
+                                      ),
+                                    ),
+                                  ),                            
+                                ],
                           ),
                       ],
                     );
@@ -178,8 +225,174 @@ class RideDetailScreen extends StatelessWidget {
               ),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+
+            child: SizedBox(
+
+              width: double.infinity,
+
+              child: ElevatedButton.icon(
+
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 14,
+                  ),
+                ),
+
+                onPressed: () async {
+
+                  final confirmed =
+                      await showDialog<bool>(
+
+                    context: context,
+
+                    builder: (context) {
+
+                      return AlertDialog(
+
+                        backgroundColor:
+                            const Color(0xFF1B1B1B),
+
+                        title: const Text(
+                          'Supprimer',
+                        ),
+
+                        content: const Text(
+                          'Cette action supprimera définitivement la sortie ainsi que les données de sécurité associées.',
+                        ),
+
+                        actions: [
+
+                          TextButton(
+
+                            onPressed: () {
+                              Navigator.pop(
+                                context,
+                                false,
+                              );
+                            },
+
+                            child: const Text(
+                              'Annuler',
+                            ),
+                          ),
+
+                          ElevatedButton(
+
+                            style:
+                                ElevatedButton.styleFrom(
+                              backgroundColor:
+                                  Colors.redAccent,
+                            ),
+
+                            onPressed: () {
+                              Navigator.pop(
+                                context,
+                                true,
+                              );
+                            },
+
+                            child: const Text(
+                              'Supprimer',
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+
+                  if (confirmed == true) {
+
+                    await deleteRide(
+                      context,
+                    );
+                  }
+                },
+
+                icon: const Icon(
+                  Icons.delete,
+                ),
+
+                label: const Text(
+                  'Supprimer la sortie',
+                ),
+              ),
+            ),
+          ),          
         ],
       ),
     );
   }
+
+  Future<void> deleteRide(
+      BuildContext context,
+    ) async {
+
+      try {
+
+        final safetySessionId =
+            ride['safetySessionId'];
+
+        // DELETE SUPABASE
+        if (safetySessionId != null) {
+
+          final supabase =
+              Supabase.instance.client;
+
+          await supabase
+              .from('safety_positions')
+              .delete()
+              .eq(
+                'session_id',
+                safetySessionId,
+              );
+
+          await supabase
+              .from('safety_sessions')
+              .delete()
+              .eq(
+                'id',
+                safetySessionId,
+              );
+        }
+
+        // DELETE LOCAL
+        final ridesBox =
+            Hive.box('rides');
+
+        await ridesBox.delete(
+          rideKey,
+        );
+
+        if (context.mounted) {
+
+          Navigator.pop(context);
+
+          ScaffoldMessenger.of(context)
+              .showSnackBar(
+
+            const SnackBar(
+              content: Text(
+                'Sortie supprimée',
+              ),
+            ),
+          );
+        }
+
+      } catch (e) {
+
+        ScaffoldMessenger.of(context)
+            .showSnackBar(
+
+          SnackBar(
+            content: Text(
+              'Erreur suppression : $e',
+            ),
+          ),
+        );
+      }
+    }
 }

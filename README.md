@@ -9,6 +9,7 @@ git commit -m "commentaire"
 git push
 
 ### Supabase
+https://supabase.com/dashboard/org/stxrbgomsaywwrksojfg
 https://eltlnrxiuvixjlakjfhz.supabase.co
 
 ## Backlog
@@ -17,19 +18,21 @@ https://eltlnrxiuvixjlakjfhz.supabase.co
 #### Accueil
 ~~Version / date & heure~~
 ~~hashtag en minuscule~~
+Supprimer sortie ne supprime pas les données en BDD
 
 #### Ride in progress
 ~~Gérer séquence d'envoi des infos (whatsapp ? SMS ? autre ?)~~ 
-Gèrer flèche retour
+Arrêter sans sauvegarder > supprimer données BDD
+
 Comparer Distance avec montre GPS
+Gèrer flèche retour
 Gérer bouton Start/stop/démarrage chrono
 Avoir une zone de message au dessus des boutons
 Blinder bouton Reset 
 
 #### Détail sortie
-Icone Départ/arrivée
+~~Icone Départ/arrivée~~
 Supprimer (+ données associées supabase)
-Zoom/dézoom VS rotation
 
 
 ### v2
@@ -45,3 +48,4 @@ Gérer bouton SOS
 Partager
 Exporter GPX
 Détails
+Zoom/dézoom VS rotation

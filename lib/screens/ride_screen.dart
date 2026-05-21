@@ -256,6 +256,8 @@ class _RideScreenState extends State<RideScreen> {
       'city': locationTags['city'],
       'department': locationTags['department'],
       'region': locationTags['region'],
+      'safetySessionId': safetySessionId,
+      'safetyShareCode': safetyShareCode,
       'points': ridePoints
           .map((point) => {
                 'lat': point.latitude,
