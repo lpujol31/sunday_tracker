@@ -1,27 +1,36 @@
 # sunday_tracker
 
 ## Stack
+
+### Github
+https://github.com/lpujol31/sunday_tracker
+git add .
+git commit -m "commentaire"
+git push
+
 ### Supabase
+https://eltlnrxiuvixjlakjfhz.supabase.co
 
 ## Backlog
 ### v1
 
 #### Accueil
-Version / date & heure
-hashtag en minuscule
+~~Version / date & heure~~
+~~hashtag en minuscule~~
 
 #### Ride in progress
+~~Gérer séquence d'envoi des infos (whatsapp ? SMS ? autre ?)~~ 
 Gèrer flèche retour
 Comparer Distance avec montre GPS
 Gérer bouton Start/stop/démarrage chrono
-Gérer séquence d'envoi des infos (whatsapp ? SMS ? autre ?) / comment gérer les contacts ? 
 Avoir une zone de message au dessus des boutons
 Blinder bouton Reset 
 
 #### Détail sortie
+Icone Départ/arrivée
 Supprimer (+ données associées supabase)
 Zoom/dézoom VS rotation
-Icone Départ/arrivée
+
 
 ### v2
 Logo appli

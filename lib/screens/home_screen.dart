@@ -6,6 +6,8 @@ import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
 import '../widgets/ride_trace_thumbnail.dart';
 
+import 'package:intl/intl.dart';
+
 class HomeScreen extends StatefulWidget 
 {
   const HomeScreen({super.key});
@@ -27,20 +29,34 @@ class _HomeScreenState extends State<HomeScreen>
   // FORMATAGE DE DONNEES
   Widget buildTag(String text) 
   {
+    final formattedText =
+        text.toLowerCase();
+
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: 10,
         vertical: 5,
       ),
+
       decoration: BoxDecoration(
-        color: Colors.orange.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(20),
+
+        color: Colors.orange.withValues(
+          alpha: 0.15,
+        ),
+
+        borderRadius:
+            BorderRadius.circular(20),
+
         border: Border.all(
-          color: Colors.orange.withOpacity(0.3),
+          color: Colors.orange.withValues(
+            alpha: 0.3,
+          ),
         ),
       ),
+
       child: Text(
-        text,
+        formattedText,
+
         style: const TextStyle(
           color: Colors.orange,
           fontSize: 9,
@@ -49,35 +65,18 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
-
-  Future<void> loadAppVersion() async {Widget buildTag(String text) 
+  Future<void> loadAppVersion() async 
   {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: 5,
-      ),
-      decoration: BoxDecoration(
-        color: Colors.orange.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.orange.withOpacity(0.3),
-        ),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: Colors.orange,
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
     final packageInfo = await PackageInfo.fromPlatform();
 
+    final formattedDate = packageInfo.updateTime != null
+        ? DateFormat('dd/MM/yyyy HH:mm').format(packageInfo.updateTime!)
+        : null;
+
     setState(() {
-      appVersion = 'v${packageInfo.version}+${packageInfo.buildNumber}';
+      appVersion =
+          'v${packageInfo.version}+${packageInfo.buildNumber}'
+          '${formattedDate != null ? ' - $formattedDate' : ''}';
     });
   }
 

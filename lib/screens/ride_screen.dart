@@ -10,6 +10,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
+import 'package:share_plus/share_plus.dart';
 
 class RideScreen extends StatefulWidget {
   const RideScreen({super.key});
@@ -50,36 +51,38 @@ class _RideScreenState extends State<RideScreen> {
   Position? currentPosition;
 
   @override
-void initState() {
-  super.initState();
+  void initState() 
+  {
+    super.initState();
 
-  WakelockPlus.enable();
+    WakelockPlus.enable();
 
-  startForegroundService();
-  createSafetySession();
+    startForegroundService();
+    createSafetySession();
 
-  rideStartTime = DateTime.now();
+    rideStartTime = DateTime.now();
 
-  rideTimer = Timer.periodic(
-    const Duration(seconds: 1),
-    (timer) {
-      setState(() {
-        rideDuration = DateTime.now().difference(rideStartTime!);
-      });
-    },
-  );
+    rideTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (timer) {
+        setState(() {
+          rideDuration = DateTime.now().difference(rideStartTime!);
+        });
+      },
+    );
 
-  startTracking();
-}
+    startTracking();
+  }
 
-Future<void> startForegroundService() async {
-  print('START FOREGROUND SERVICE');
+  Future<void> startForegroundService() async 
+  {
+    print('START FOREGROUND SERVICE');
 
-  final serviceStarted =
-      await FlutterBackgroundService().startService();
+    final serviceStarted =
+        await FlutterBackgroundService().startService();
 
-  print('SERVICE STARTED: $serviceStarted');
-}
+    print('FOREGROUND SERVICE STARTED: $serviceStarted');
+  }
 
   @override
   void dispose() 
@@ -118,6 +121,7 @@ Future<void> startForegroundService() async {
 
     final supabase = Supabase.instance.client;
 
+    print('BEFORE UPLOAD SAFETY POSITION');
     await supabase
         .from('safety_positions')
         .insert({
@@ -126,11 +130,12 @@ Future<void> startForegroundService() async {
           'longitude': currentPosition!.longitude,
         });
 
-    print('SAFETY POSITION UPLOADED');
+    print('AFTER UPLOAD SAFETY POSITION');
   }
 
   void startSafetyUploadTimer() 
   {
+    print('startSafetyUploadTimer()');
     safetyUploadTimer = Timer.periodic(
     const Duration(seconds: 30),
     (timer) async {
@@ -149,6 +154,7 @@ Future<void> startForegroundService() async {
         .from('safety_sessions')
         .insert({
           'share_code': shareCode,
+           'status': 'in_progress',
         })
         .select()
         .single();
@@ -164,16 +170,52 @@ Future<void> startForegroundService() async {
       'SHARE CODE: $safetyShareCode',
     );
     startSafetyUploadTimer();
+    print('AVANT shareSafetyLink');
+    await shareSafetyLink();
+    print('APRES shareSafetyLink');
+  }
+
+  Future<void> shareSafetyLink() async 
+  {
+
+    if (safetyShareCode == null) {
+      return;
+    }
+
+    final safetyUrl =
+        'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
+
+    final message = '''
+
+  Je démarre une sortie avec Sunday Tracker.
+
+  Tu peux consulter ma dernière position connue ici :
+
+  $safetyUrl
+
+  Ce lien est uniquement destiné à la sécurité.
+
+  ''';
+
+    await Share.share(
+      message,
+      subject: 'Sunday Tracker Safety Beacon',
+    );
   }
 
   Future<void> togglePauseRide() async {
-    if (!rideIsPaused) {
+    if (!rideIsPaused) 
+    {
       await positionStream?.cancel();
       rideTimer?.cancel();
 
       setState(() {
         rideIsPaused = true;
       });
+      await Supabase.instance.client
+        .from('safety_sessions')
+        .update({'status': 'paused'})
+        .eq('id', safetySessionId!);
 
       return;
     }
@@ -194,6 +236,10 @@ Future<void> startForegroundService() async {
     setState(() {
       rideIsPaused = false;
     });
+    await Supabase.instance.client
+      .from('safety_sessions')
+      .update({'status': 'in_progress'})
+      .eq('id', safetySessionId!);
   }
 
   Future<void> saveRide() async 
@@ -220,10 +266,19 @@ Future<void> startForegroundService() async {
 
     await box.add(ride);
 
+    await Supabase.instance.client
+        .from('safety_sessions')
+        .update({
+          'status': 'finished',
+          'ended_at': DateTime.now().toIso8601String(),
+        })
+        .eq('id', safetySessionId!);
+
     print('Sortie sauvegardée : $ride');
   }
 
-  Future<void> startTracking() async {
+  Future<void> startTracking() async 
+  {
 
   LocationPermission permission;
 
@@ -731,6 +786,17 @@ HapticFeedback.mediumImpact();
                 ),
               ),
             ],
+          ),
+        ),
+
+        const Spacer(),
+        Text(
+          '$safetyShareCode',
+
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+            color: Colors.teal,
           ),
         ),
 
