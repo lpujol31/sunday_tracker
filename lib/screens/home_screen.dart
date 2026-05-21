@@ -242,7 +242,11 @@ class _HomeScreenState extends State<HomeScreen>
                           );
                         },
                         onDismissed: (direction) async {
-                          await box.delete(rideKey);
+                          await deleteRide(
+                            context,
+                            ride,
+                            rideKey,
+                          );
                         },
                         child: GestureDetector(
                           onTap: () {

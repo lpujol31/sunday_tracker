@@ -74,6 +74,31 @@ class _RideScreenState extends State<RideScreen> {
     startTracking();
   }
 
+  Future discardRide() async 
+  {
+    try {
+      safetyUploadTimer?.cancel();
+      await positionStream?.cancel();
+      rideTimer?.cancel();
+
+      if (safetySessionId != null) {
+        final supabase = Supabase.instance.client;
+
+        await supabase
+            .from('safety_positions')
+            .delete()
+            .eq('session_id', safetySessionId!);
+
+        await supabase
+            .from('safety_sessions')
+            .delete()
+            .eq('id', safetySessionId!);
+      }
+    } catch (e) {
+      print('Erreur abandon ride : $e');
+    }
+  }
+
   Future<void> startForegroundService() async 
   {
     print('START FOREGROUND SERVICE');
@@ -882,10 +907,10 @@ HapticFeedback.mediumImpact();
                     Navigator.pop(context);
                   }
 
-                  if (result == 'discard') {
-
+                  if (result == 'discard') 
+                  {
+                    await discardRide();
                     if (!context.mounted) return;
-
                     Navigator.pop(context);
                   }
                 },

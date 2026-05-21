@@ -18,11 +18,11 @@ https://eltlnrxiuvixjlakjfhz.supabase.co
 #### Accueil
 ~~Version / date & heure~~
 ~~hashtag en minuscule~~
-Supprimer sortie ne supprime pas les données en BDD
+~~Supprimer sortie ne supprime pas les données en BDD~~
 
 #### Ride in progress
 ~~Gérer séquence d'envoi des infos (whatsapp ? SMS ? autre ?)~~ 
-Arrêter sans sauvegarder > supprimer données BDD
+~~Arrêter sans sauvegarder > supprimer données BDD~~
 
 Comparer Distance avec montre GPS
 Gèrer flèche retour

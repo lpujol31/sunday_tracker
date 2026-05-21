@@ -6,7 +6,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-class RideDetailScreen extends StatelessWidget {
+class RideDetailScreen extends StatelessWidget 
+{
 
   final Map ride;
   final dynamic rideKey;
@@ -304,13 +305,15 @@ class RideDetailScreen extends StatelessWidget {
                     },
                   );
 
-                  if (confirmed == true) {
-
+                  if (confirmed == true) 
+                  {
                     await deleteRide(
                       context,
-                    );
-                  }
-                },
+                      ride,
+                      rideKey,
+                      popAfterDelete: true,
+                    );                  }
+                  },
 
                 icon: const Icon(
                   Icons.delete,
@@ -326,10 +329,14 @@ class RideDetailScreen extends StatelessWidget {
       ),
     );
   }
+}
 
   Future<void> deleteRide(
       BuildContext context,
-    ) async {
+      Map ride,
+      dynamic rideKey, {
+      bool popAfterDelete = false,
+    }) async {
 
       try {
 
@@ -367,9 +374,11 @@ class RideDetailScreen extends StatelessWidget {
           rideKey,
         );
 
-        if (context.mounted) {
-
-          Navigator.pop(context);
+        if (context.mounted) 
+        {
+          if (popAfterDelete) {
+            Navigator.pop(context);
+          }
 
           ScaffoldMessenger.of(context)
               .showSnackBar(
@@ -395,4 +404,3 @@ class RideDetailScreen extends StatelessWidget {
         );
       }
     }
-}
