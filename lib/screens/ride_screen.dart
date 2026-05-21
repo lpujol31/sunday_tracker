@@ -218,14 +218,200 @@ class _RideScreenState extends State<RideScreen> {
 
   $safetyUrl
 
-  Ce lien est uniquement destiné à la sécurité.
-
   ''';
 
     await Share.share(
       message,
       subject: 'Sunday Tracker Safety Beacon',
     );
+  }
+
+  Future<void> _showExitRideModal() async 
+  {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Quitter la sortie ?',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              const Text(
+                'Que souhaitez-vous faire ?',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.white70,
+                ),
+              ),
+
+              const SizedBox(height: 32),
+
+              /// CONTINUER
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                  },
+                  child: const Text(
+                    'Continuer',
+                    style: TextStyle(
+                      color: Color(0xFFD0BCFF),
+                      fontSize: 18,
+                    ),
+                  ),
+                ),
+              ),
+
+              /// TERMINER SANS SAVE
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+
+                    /// TODO :
+                    /// stop tracking
+                    /// delete local ride
+                    /// delete supabase ride
+
+                    Navigator.pop(context);
+                  },
+                  child: const Text(
+                    'Terminer sans sauvegarder',
+                    style: TextStyle(
+                      color: Colors.orange,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              /// SAVE
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+
+                    /// TODO :
+                    /// save ride
+                    /// stop tracking
+
+                    Navigator.pop(context);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF5A4F),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(32),
+                    ),
+                  ),
+                  child: const Text(
+                    'Sauvegarder et quitter',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 12),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> showExitRideDialog() async {
+  final result = await showDialog<String>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        backgroundColor: const Color(0xFF1B1B1B),
+        title: const Text('Quitter la sortie'),
+        content: const Text(
+          'Que souhaitez-vous faire avec cette sortie ?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'continue'),
+            child: const Text('Continuer'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text(
+              'Annuler la sortie',
+              style: TextStyle(color: Colors.orange),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            onPressed: () => Navigator.pop(context, 'save'),
+            child: const Text('Sauvegarder'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (result == 'save') {
+    await saveRide();
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  if (result == 'discard') {
+    await cancelRide();
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+}
+
+  Future<void> cancelRide() async {
+    safetyUploadTimer?.cancel();
+    await positionStream?.cancel();
+    rideTimer?.cancel();
+
+    if (safetySessionId != null) {
+      final supabase = Supabase.instance.client;
+
+      await supabase
+          .from('safety_positions')
+          .delete()
+          .eq('session_id', safetySessionId!);
+
+      await supabase
+          .from('safety_sessions')
+          .delete()
+          .eq('id', safetySessionId!);
+    }
   }
 
   Future<void> togglePauseRide() async {
@@ -466,14 +652,24 @@ HapticFeedback.mediumImpact();
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) 
+  {
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+return WillPopScope(
+  onWillPop: () async {
+    _showExitRideModal();
+    return false;
+  },
+  child: Scaffold(
+          backgroundColor: const Color(0xFF0D0D0D),
 
       appBar: AppBar(
         backgroundColor: const Color(0xFF0D0D0D),
         elevation: 0,
+leading: IconButton(
+  icon: const Icon(Icons.arrow_back),
+  onPressed: _showExitRideModal,
+),
         title: const Text('Ride in progress'),
       ),
 
@@ -840,80 +1036,7 @@ HapticFeedback.mediumImpact();
                   padding: const EdgeInsets.symmetric(vertical: 18),
                 ),
 
-                onPressed: () async {
-
-                  final result = await showDialog<String>(
-                    context: context,
-
-                    builder: (context) {
-                      return AlertDialog(
-                        backgroundColor: const Color(0xFF1B1B1B),
-
-                        title: const Text(
-                          'Terminer la sortie',
-                        ),
-
-                        content: const Text(
-                          'Que souhaitez-vous faire avec cette sortie ?',
-                        ),
-
-                        actions: [
-
-                          TextButton(
-                            onPressed: () =>
-                                Navigator.pop(context, 'cancel'),
-
-                            child: const Text(
-                              'Annuler',
-                            ),
-                          ),
-
-                          TextButton(
-                            onPressed: () =>
-                                Navigator.pop(context, 'discard'),
-
-                            child: const Text(
-                              'Arrêter sans sauvegarder',
-
-                              style: TextStyle(
-                                color: Colors.orange,
-                              ),
-                            ),
-                          ),
-
-                          ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                            ),
-
-                            onPressed: () =>
-                                Navigator.pop(context, 'save'),
-
-                            child: const Text(
-                              'Sauvegarder',
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  );
-
-                  if (result == 'save') {
-
-                    await saveRide();
-
-                    if (!context.mounted) return;
-
-                    Navigator.pop(context);
-                  }
-
-                  if (result == 'discard') 
-                  {
-                    await discardRide();
-                    if (!context.mounted) return;
-                    Navigator.pop(context);
-                  }
-                },
+                onPressed: _showExitRideModal,
 
                 child: const Text(
                   'STOP',
@@ -1004,6 +1127,7 @@ HapticFeedback.mediumImpact();
           ],
         ),        ],
       ),
+    ),
     ),
   );
   }
