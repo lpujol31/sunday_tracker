@@ -25,6 +25,7 @@ class _RideScreenState extends State<RideScreen> {
   String longitude = 'Loading...';
   String altitude = 'Loading...';
   StreamSubscription<Position>? positionStream;
+  StreamSubscription<Position>? gpsInitializationStream;
   final MapController mapController = MapController();
   bool mapReady = false;
   final List<LatLng> ridePoints = [];
@@ -42,13 +43,18 @@ class _RideScreenState extends State<RideScreen> {
 
   // RIDE : état
   bool rideIsPaused = false;
+  bool rideIsStarted = false;
 
   String? safetySessionId;
   String? safetyShareCode;
+  String? safetyUrl;
 
   Timer? safetyUploadTimer;
 
   Position? currentPosition;
+
+  bool gpsIsReady = false;
+  bool gpsIsInitializing = true;
 
   @override
   void initState() 
@@ -57,8 +63,78 @@ class _RideScreenState extends State<RideScreen> {
 
     WakelockPlus.enable();
 
-    startForegroundService();
-    createSafetySession();
+    initializeGps();
+  }
+
+  Future<void> initializeGps() async 
+  {
+    LocationPermission permission;
+
+    permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      if (!mounted) return;
+
+      setState(() {
+        gpsIsInitializing = false;
+        gpsIsReady = false;
+        accuracy = 'Permission refusée';
+      });
+
+      return;
+    }
+
+    await gpsInitializationStream?.cancel();
+
+    gpsInitializationStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 0,
+      ),
+    ).listen((Position position) async {
+      currentPosition = position;
+
+      if (!mounted) return;
+
+      setState(() {
+        latitude = position.latitude.toString();
+        longitude = position.longitude.toString();
+        altitude = position.altitude.toStringAsFixed(1);
+        accuracy = position.accuracy.toStringAsFixed(1);
+
+        gpsIsInitializing = false;
+        gpsIsReady = position.accuracy <= 20;
+      });
+
+      if (mapReady) {
+        mapController.move(
+          LatLng(position.latitude, position.longitude),
+          16,
+        );
+      }
+
+      if (position.accuracy <= 20) {
+        await gpsInitializationStream?.cancel();
+        gpsInitializationStream = null;
+      }
+    });
+  }
+
+  Future<void> startRide() async 
+  {
+    await gpsInitializationStream?.cancel();
+    gpsInitializationStream = null;
+
+    await startForegroundService();
+
+    await createSafetySession();
+
+    // Partage automatique du lien safety au démarrage.
+    await shareSafetyLink();
 
     rideStartTime = DateTime.now();
 
@@ -71,7 +147,11 @@ class _RideScreenState extends State<RideScreen> {
       },
     );
 
-    startTracking();
+    await startTracking();
+
+    setState(() {
+      rideIsStarted = true;
+    });
   }
 
   Future discardRide() async 
@@ -113,6 +193,7 @@ class _RideScreenState extends State<RideScreen> {
   void dispose() 
   {
     positionStream?.cancel();
+    gpsInitializationStream?.cancel();
     rideTimer?.cancel();
     WakelockPlus.disable();
     FlutterBackgroundService().invoke('stopService');
@@ -162,7 +243,7 @@ class _RideScreenState extends State<RideScreen> {
   {
     print('startSafetyUploadTimer()');
     safetyUploadTimer = Timer.periodic(
-    const Duration(seconds: 30),
+    const Duration(seconds: 15),
     (timer) async {
       await uploadSafetyPosition();
     },
@@ -187,6 +268,8 @@ class _RideScreenState extends State<RideScreen> {
     safetySessionId = response['id'];
     safetyShareCode = shareCode;
 
+    safetyUrl = 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
+
     print(
       'SAFETY SESSION CREATED: $safetySessionId',
     );
@@ -195,9 +278,9 @@ class _RideScreenState extends State<RideScreen> {
       'SHARE CODE: $safetyShareCode',
     );
     startSafetyUploadTimer();
-    print('AVANT shareSafetyLink');
-    await shareSafetyLink();
-    print('APRES shareSafetyLink');
+    //print('AVANT shareSafetyLink');
+    //await shareSafetyLink();
+    //print('APRES shareSafetyLink');
   }
 
   Future<void> shareSafetyLink() async 
@@ -228,15 +311,15 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> _showExitRideModal() async 
   {
-    showModalBottomSheet(
+    final screenNavigator = Navigator.of(context);
+
+    await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(24),
-        ),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) {
+      builder: (modalContext) {
         return Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -251,25 +334,18 @@ class _RideScreenState extends State<RideScreen> {
                   color: Colors.white,
                 ),
               ),
-
               const SizedBox(height: 12),
-
               const Text(
                 'Que souhaitez-vous faire ?',
-                style: TextStyle(
-                  fontSize: 16,
-                  color: Colors.white70,
-                ),
+                style: TextStyle(fontSize: 16, color: Colors.white70),
               ),
-
               const SizedBox(height: 32),
 
-              /// CONTINUER
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton(
                   onPressed: () {
-                    Navigator.pop(context);
+                    Navigator.of(modalContext).pop();
                   },
                   child: const Text(
                     'Continuer',
@@ -281,18 +357,16 @@ class _RideScreenState extends State<RideScreen> {
                 ),
               ),
 
-              /// TERMINER SANS SAVE
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton(
                   onPressed: () async {
-                    Navigator.pop(context); // ferme la modal
+                    Navigator.of(modalContext).pop();
 
                     await cancelRide();
 
                     if (!mounted) return;
-
-                    Navigator.pop(context); // retour accueil
+                    screenNavigator.pop();
                   },
                   child: const Text(
                     'Terminer sans sauvegarder',
@@ -307,20 +381,18 @@ class _RideScreenState extends State<RideScreen> {
 
               const SizedBox(height: 12),
 
-              /// SAVE
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                onPressed: () async {
-                  Navigator.pop(context); // ferme la modal
+                  onPressed: () async {
+                    Navigator.of(modalContext).pop();
 
-                  await saveRide();
+                    await saveRide();
 
-                  if (!mounted) return;
-
-                  Navigator.pop(context); // retour accueil
-                },
-                    style: ElevatedButton.styleFrom(
+                    if (!mounted) return;
+                    screenNavigator.pop();
+                  },
+                  style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFFF5A4F),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 18),
@@ -479,7 +551,10 @@ class _RideScreenState extends State<RideScreen> {
 
     }
 
+    currentPosition = position;
+
     setState(() {
+      gpsIsReady = position.accuracy <= 15;
       latitude = position.latitude.toString();
       longitude = position.longitude.toString();
       altitude = position.altitude.toStringAsFixed(1);
@@ -501,13 +576,6 @@ HapticFeedback.mediumImpact();
     );
   });
 }
-
-  void resetRideInfos() 
-  {
-      ridePoints.clear();
-      totalDistance = 0;
-  }
-
 
   Future<Map<String, String>> getRideLocationTags() async 
   {
@@ -603,13 +671,23 @@ HapticFeedback.mediumImpact();
     return 'Faible';
   }
 
+  Future<void> handleBackPressed() async 
+  {
+    if (!rideIsStarted) {
+      Navigator.of(context).pop();
+      return;
+    }
+
+    await _showExitRideModal();
+  }
+
   @override
   Widget build(BuildContext context) 
   {
 
 return WillPopScope(
   onWillPop: () async {
-    _showExitRideModal();
+    await handleBackPressed();
     return false;
   },
   child: Scaffold(
@@ -620,7 +698,7 @@ return WillPopScope(
         elevation: 0,
 leading: IconButton(
   icon: const Icon(Icons.arrow_back),
-  onPressed: _showExitRideModal,
+  onPressed: handleBackPressed,
 ),
         title: const Text('Ride in progress'),
       ),
@@ -628,7 +706,50 @@ leading: IconButton(
       body: Padding(
         padding: const EdgeInsets.all(16),
 
-        child: Column(
+        child: gpsIsInitializing
+            ? const Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 24),
+                    Text(
+                      'Initialisation GPS...',
+                      style: TextStyle(
+                        fontSize: 18,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            : !gpsIsReady
+                ? Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.gps_off,
+                        size: 80,
+                        color: Colors.orange,
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Recherche du signal GPS...',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Précision actuelle : $accuracy m',
+                        style: const TextStyle(fontSize: 18),
+                      ),
+                      const SizedBox(height: 32),
+                      const CircularProgressIndicator(),
+                    ],
+                  )
+                : Column(
           children: [
 
             ClipRRect(
@@ -965,119 +1086,121 @@ leading: IconButton(
         ),
 
         const Spacer(),
-        Text(
-          '$safetyShareCode',
 
-          style: const TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-            color: Colors.teal,
+        if (!rideIsStarted)
+          const Text(
+            'GPS prêt',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: Colors.teal,
+            ),
+          )
+        else if (safetyShareCode != null)
+          Text(
+            safetyUrl!,
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: Colors.teal,
+            ),
           ),
-        ),
 
         const Spacer(),
 
-        Row(
-          children: [
-
-            // STOP RIDE
-            Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.grey[850],
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                ),
-
-                onPressed: _showExitRideModal,
-
-                child: const Text(
-                  'STOP',
-                  style: TextStyle(fontSize: 18),
+        if (!rideIsStarted)
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.teal,
+                padding: const EdgeInsets.symmetric(vertical: 18),
+              ),
+              onPressed: startRide,
+              child: const Text(
+                'Démarrer la sortie',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
+          )
+        else
+          Row(
+            children: [
 
-            const SizedBox(width: 16),
-
-            Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: rideIsPaused ? Colors.green : Colors.orange,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                ),
-                onPressed: () {
-                  togglePauseRide();
-                },
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-
-                  children: [
-
-                    Icon(
-                      rideIsPaused
-                          ? Icons.play_arrow
-                          : Icons.pause,
-
-                      size: 20,
-                      color: Colors.white,
-                    ),
-
-                    const SizedBox(width: 4),
-
-                    Text(
-                      rideIsPaused
-                          ? 'Reprise'
-                          : 'Pause',
-
-                      style: const TextStyle(
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
+              /// STOP
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[850],
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+                  onPressed: _showExitRideModal,
+                  child: const Text(
+                    'STOP',
+                    style: TextStyle(fontSize: 18),
+                  ),
                 ),
               ),
-            ),
-            
-            const SizedBox(width: 16),
 
-            // RESET
-            Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                ),
+              const SizedBox(width: 16),
 
-                onPressed: () {
-                  resetRideInfos();
-                },
-
-                child: const Text(
-                  'Reset',
-                  style: TextStyle(fontSize: 18),
-                ),
-              ),
-            ),
-
-            const SizedBox(width: 16),
-            // SOS
-            Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                ),
-
-                onPressed: () {},
-
-                child: const Text(
-                  'SOS',
-                  style: TextStyle(fontSize: 18),
+              /// PAUSE / REPRISE
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        rideIsPaused ? Colors.green : Colors.orange,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+                  onPressed: togglePauseRide,
+                  child: Text(
+                    rideIsPaused
+                        ? 'Reprendre'
+                        : 'Pause',
+                    style: const TextStyle(fontSize: 18),
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),        ],
+
+              const SizedBox(width: 16),
+
+              /// PARTAGER
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+                  onPressed: shareSafetyLink,
+                  child: const Icon(
+                    Icons.share,
+                    size: 22,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+
+              const SizedBox(width: 16),
+
+              /// SOS
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+                  onPressed: () {},
+                  child: const Text(
+                    'SOS',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                ),
+              ),
+            ],
+          ),        ],
       ),
     ),
     ),
