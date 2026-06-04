@@ -287,15 +287,19 @@ class _HomeScreenState extends State<HomeScreen>
                                         children: [
 
                                           Text(
-                                            'Sortie du $formattedDate',
+                                            ride['name'] ?? '$formattedDate',
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
                                               fontSize: 15,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
-
                                           const SizedBox(height: 5),
-                                          Row(
+                                          Wrap(
+                                            spacing: 2,
+                                            runSpacing: 4,
+                                            crossAxisAlignment: WrapCrossAlignment.center,
                                             children: [
                                               const Icon(
                                                 Icons.timer,
@@ -303,7 +307,6 @@ class _HomeScreenState extends State<HomeScreen>
                                                 color: Colors.white60,
                                               ),
 
-                                              const SizedBox(width: 4),
                                               Text(
                                                 formatDuration(
                                                   ride['durationSeconds'],
@@ -313,14 +316,12 @@ class _HomeScreenState extends State<HomeScreen>
                                                 ),
                                               ),
 
-                                              const SizedBox(width: 4),
                                               const Icon(
                                                 Icons.route,
                                                 size: 16,
                                                 color: Colors.white60,
                                               ),
 
-                                              const SizedBox(width: 4),
                                               Text(
                                                 formatDistance(
                                                   ride['distanceMeters'],
@@ -330,7 +331,7 @@ class _HomeScreenState extends State<HomeScreen>
                                                 ),
                                               ),
                                             ],
-                                          ),
+                                          )                                          
                                         ],
                                       ),
                                     ),
@@ -371,6 +372,13 @@ class _HomeScreenState extends State<HomeScreen>
                                       buildTag(
                                         '#${ride['city']}',
                                       ),
+
+                                    if ((ride['note'] ?? '').toString().isNotEmpty)
+                                      const Icon(
+                                        Icons.notes,
+                                        size: 14,
+                                        color: Colors.white38,
+                                      ),  
                                   ],
                                 ),
                               ],
