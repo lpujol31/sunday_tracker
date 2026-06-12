@@ -106,17 +106,63 @@ class _HomeScreenState extends State<HomeScreen>
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0D0D0D),
-        title: const Text('Sunday Tracker'),
-      ),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            RichText(
+              text: TextSpan(
+                children: [
+                  const TextSpan(
+                    text: 'Sunday ',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  WidgetSpan(
+                    child: ShaderMask(
+                      shaderCallback: (bounds) => const LinearGradient(
+                        colors: [
+                          Color(0xFF6D28D9),
+                          Color(0xFFD946EF),
+                          Color(0xFFFF8A00),
+                        ],
+                      ).createShader(bounds),
+                      child: const Text(
+                        'Tracker',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Text(
+              'Prêt pour une nouvelle aventure ?',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.white,
+              ),
+            ),
+          ],
+        ),
+        toolbarHeight: 70,
+      ),      
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             SizedBox(
               width: double.infinity,
-              height: 56,
-              child: ElevatedButton(
-                onPressed: () {
+              height: 108,
+              child: 
+              GestureDetector(
+                onTap: () {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -124,11 +170,83 @@ class _HomeScreenState extends State<HomeScreen>
                     ),
                   );
                 },
-                child: const Text(
-                  'Start Ride',
-                  style: TextStyle(fontSize: 18),
+                child: Container(
+                  width: double.infinity,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        Color(0xFF6D28D9),
+                        Color(0xFFD946EF),
+                        Color(0xFFFF8A00),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(32),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.orange.withOpacity(0.35),
+                        blurRadius: 25,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 82,
+                          height: 82,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white.withOpacity(0.15),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.3),
+                              width: 16,
+                            ),
+                          ),
+                          child: const Icon(
+                            Icons.play_arrow_rounded,
+                            color: Colors.white,
+                            size: 48,
+                          ),
+                        ),
+
+                        const SizedBox(width: 24),
+
+                        const Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  'START RIDE',
+                                  style: TextStyle(
+                                    fontSize: 38,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        const Icon(
+                          Icons.arrow_forward_rounded,
+                          color: Colors.white,
+                          size: 42,
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+              )
             ),
 
             const SizedBox(height: 20),
@@ -279,22 +397,28 @@ class _HomeScreenState extends State<HomeScreen>
                                       points: ride['points'] ?? [],
                                     ),
 
-                                    const SizedBox(width: 16),
+                                    const SizedBox(width: 8),
                                     Expanded(
                                       child: Column(
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
                                         children: [
-
-                                          Text(
-                                            ride['name'] ?? '$formattedDate',
-                                            maxLines: 2,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 15,
-                                              fontWeight: FontWeight.bold,
-                                            ),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  ride['name'] ?? '$formattedDate',
+                                                  maxLines: 2,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    fontSize: 15,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
+
                                           const SizedBox(height: 5),
                                           Wrap(
                                             spacing: 2,
@@ -331,7 +455,24 @@ class _HomeScreenState extends State<HomeScreen>
                                                 ),
                                               ),
                                             ],
-                                          )                                          
+                                          ),
+                                          const SizedBox(height: 5),
+                                          Wrap(
+                                            spacing: 2,
+                                            runSpacing: 4,
+                                            crossAxisAlignment: WrapCrossAlignment.center,
+                                            children: [
+                                              if ((ride['note'] ?? '').toString().isNotEmpty) ...[
+                                                const SizedBox(width: 0),
+                                                const Icon(
+                                                  Icons.notes_rounded,
+                                                  size: 22,
+                                                  color: Colors.orange,
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+
                                         ],
                                       ),
                                     ),
@@ -372,13 +513,6 @@ class _HomeScreenState extends State<HomeScreen>
                                       buildTag(
                                         '#${ride['city']}',
                                       ),
-
-                                    if ((ride['note'] ?? '').toString().isNotEmpty)
-                                      const Icon(
-                                        Icons.notes,
-                                        size: 14,
-                                        color: Colors.white38,
-                                      ),  
                                   ],
                                 ),
                               ],

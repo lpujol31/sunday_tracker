@@ -11,6 +11,18 @@ git add .
 git commit -m "commentaire"
 git push
 
+
+### commandes ADB
+lister les devices
+adb devices
+
+dir du dossier
+adb -s R5CR910WZTX shell run-as com.example.sunday_tracker ls app_flutter
+adb -s R5CR910WZTX shell run-as com.example.sunday_tracker ls app_flutter/waypoint_photos
+
+supprimer un fichier
+adb -s R5CR910WZTX shell run-as com.example.sunday_tracker rm app_flutter/waypoint_photos/wp_1781214796094.jpg
+
 ### Supabase
 https://supabase.com/dashboard/org/stxrbgomsaywwrksojfg
 https://eltlnrxiuvixjlakjfhz.supabase.co
@@ -19,47 +31,27 @@ https://eltlnrxiuvixjlakjfhz.supabase.co
 ### v1
 
 #### Bugs
-03/06/2026
-~~Enregistrement de points incohérents (cf. llança)
-~~Soucis affichage Accueil~~
 
 #### Accueil
-~~Version / date & heure~~
-~~hashtag en minuscule~~
-~~Supprimer sortie ne supprime pas les données en BDD~~
 
 #### Ride in progress
-~~Gérer séquence d'envoi des infos (whatsapp ? SMS ? autre ?)~~ 
-~~Arrêter sans sauvegarder > supprimer données BDD~~
-
-Quand on clique sur Stop que ça arrête le chrono et la prise de position GPS
-
-Comparer Distance avec montre GPS
-Gèrer flèche retour
-Gérer bouton Start/stop/démarrage chrono
-Avoir une zone de message au dessus des boutons
-Blinder bouton Reset 
 
 #### Détail sortie
-~~Icone Départ/arrivée~~
-~~Supprimer (+ données associées supabase)~~
 
 
 ### v2
-Logo appli
+
 
 #### Accueil
 Preview avec fond de carte
 
 #### Ride in progress
-Prendre photo qui soit associée à un point GPS
+
 Gérer bouton SOS
 
 #### Détail sortie
-Partager
-Exporter GPX
-Détails
-Zoom/dézoom VS rotation
 
-### vXXXX
+
+### Ideas
 Commandes guidon (prise de WP, photos)
+

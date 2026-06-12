@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.9+5
+version: 0.0.9+7
 
 environment:
   sdk: ^3.11.5
@@ -74,6 +74,12 @@ dependencies:
 
   # Accès aux dossiers temporaires de l’app (pour créer le fichier GPX avant partage)
   path_provider: ^2.1.2
+
+  # Permet d'ouvrir des URL externes (site web, e-mail, téléphone, SMS, etc.)
+  url_launcher: ^6.3.0
+
+  # Permet de sélectionner ou de capturer des images depuis la galerie ou l'appareil photo
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_test:

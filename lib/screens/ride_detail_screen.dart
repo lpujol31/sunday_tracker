@@ -10,6 +10,8 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'dart:io';
+
 class RideDetailScreen extends StatefulWidget 
 {
   final Map ride;
@@ -67,6 +69,33 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     return '$h:$m:$s';
   }
 
+  String _formatWaypointTime(dynamic isoString) {
+    if (isoString == null) return '--';
+    final dt = DateTime.tryParse(isoString);
+    if (dt == null) return '--';
+    return '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+  }
+
+  // Interpolation de couleur pour le dégradé du tracé
+  List<Color> _buildGradientColors(int count) {
+    const colors = [
+      Color(0xFF6D28D9),
+      Color(0xFFD946EF),
+      Color(0xFFFF8A00),
+    ];
+    if (count <= 1) return [colors.first];
+    return List.generate(count, (i) {
+      final t = i / (count - 1);
+      if (t <= 0.5) {
+        final tt = t / 0.5;
+        return Color.lerp(colors[0], colors[1], tt)!;
+      } else {
+        final tt = (t - 0.5) / 0.5;
+        return Color.lerp(colors[1], colors[2], tt)!;
+      }
+    });
+  }
+
   Future<void> _showEditModal() async {
     final nameController = TextEditingController(text: rideName);
     final noteController = TextEditingController(text: rideNote);
@@ -92,11 +121,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
             children: [
               const Text(
                 'Modifier la sortie',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
               ),
               const SizedBox(height: 24),
               const Text('Nom', style: TextStyle(fontSize: 14, color: Colors.white54)),
@@ -141,21 +166,13 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                     backgroundColor: Colors.teal,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(32),
-                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
                   ),
                   onPressed: () async {
                     Navigator.of(modalContext).pop();
-                    await _saveEdits(
-                      nameController.text.trim(),
-                      noteController.text.trim(),
-                    );
+                    await _saveEdits(nameController.text.trim(), noteController.text.trim());
                   },
-                  child: const Text(
-                    'Sauvegarder',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
+                  child: const Text('Sauvegarder', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ),
             ],
@@ -178,6 +195,96 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     });
   }
 
+  void _showWaypointPopup(BuildContext context, Map wp) {
+    final photos = (wp['photos'] as List?)?.cast<String>() ?? [];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.place, color: Colors.blue, size: 22),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Point mémorisé — ${_formatWaypointTime(wp['timestamp'])}',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if ((wp['note'] ?? '').toString().isNotEmpty)
+                Text(
+                  wp['note'],
+                  style: const TextStyle(fontSize: 15, color: Colors.white70),
+                )
+              else
+                const Text(
+                  'Aucune note',
+                  style: TextStyle(fontSize: 15, color: Colors.white38, fontStyle: FontStyle.italic),
+                ),
+              if (photos.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 120,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: photos.length,
+                  itemBuilder: (context, index) {
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: GestureDetector(
+                        onTap: () {
+                          showDialog(
+                            context: context,
+                            builder: (_) => Dialog(
+                              backgroundColor: Colors.black,
+                              child: InteractiveViewer(
+                                child: Image.file(
+                                  File(photos[index]),
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.file(
+                            File(photos[index]),
+                            width: 120,
+                            height: 120,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 16),
+              Text(
+                'Lat: ${wp['lat'].toStringAsFixed(6)}  Long: ${wp['lng'].toStringAsFixed(6)}',
+                style: const TextStyle(fontSize: 12, color: Colors.white38),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final pointsData = widget.ride['points'] as List;
@@ -185,29 +292,20 @@ class _RideDetailScreenState extends State<RideDetailScreen>
       return LatLng(point['lat'], point['lng']);
     }).toList();
 
-    final startPoint = ridePoints.isNotEmpty
-        ? ridePoints.first
-        : LatLng(48.8566, 2.3522);
+    final waypointsData = (widget.ride['waypoints'] as List?)?.cast<Map>() ?? [];
+
+    final startPoint = ridePoints.isNotEmpty ? ridePoints.first : LatLng(48.8566, 2.3522);
+
+    // Tracé en dégradé : on découpe en segments colorés
+    final gradientColors = _buildGradientColors(ridePoints.length);
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
-        title: Text(
-          rideName,
-          overflow: TextOverflow.ellipsis,
-          maxLines: 1,
-        ),
+        title: Text(rideName, overflow: TextOverflow.ellipsis, maxLines: 1),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.edit_outlined),
-            tooltip: 'Modifier',
-            onPressed: _showEditModal,
-          ),
-          IconButton(
-            icon: const Icon(Icons.share),
-            tooltip: 'Exporter GPX',
-            onPressed: exportAndShareGpx,
-          ),
+          IconButton(icon: const Icon(Icons.edit_outlined), tooltip: 'Modifier', onPressed: _showEditModal),
+          IconButton(icon: const Icon(Icons.share), tooltip: 'Exporter GPX', onPressed: exportAndShareGpx),
         ],
       ),
 
@@ -228,50 +326,47 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                       await Future.delayed(const Duration(milliseconds: 300));
                       final bounds = LatLngBounds.fromPoints(ridePoints);
                       mapController.fitCamera(
-                        CameraFit.bounds(
-                          bounds: bounds,
-                          padding: const EdgeInsets.all(60),
-                        ),
+                        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(60)),
                       );
                     });
 
                     return FlutterMap(
                       mapController: mapController,
-                      options: MapOptions(
-                        initialCenter: startPoint,
-                        initialZoom: 13,
-                      ),
+                      options: MapOptions(initialCenter: startPoint, initialZoom: 13),
                       children: [
                         TileLayer(
                           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                           userAgentPackageName: 'com.example.sunday_tracker',
                         ),
-                        PolylineLayer(
-                          polylines: [
-                            Polyline(
-                              points: ridePoints,
-                              strokeWidth: 5,
-                              color: Colors.orange,
-                            ),
-                          ],
-                        ),
+
+                        // TRACÉ EN DÉGRADÉ : un segment par paire de points
+                        if (ridePoints.length >= 2)
+                          PolylineLayer(
+                            polylines: List.generate(ridePoints.length - 1, (i) {
+                              return Polyline(
+                                points: [ridePoints[i], ridePoints[i + 1]],
+                                strokeWidth: 5,
+                                color: gradientColors[i],
+                              );
+                            }),
+                          ),
+
                         if (ridePoints.isNotEmpty)
                           MarkerLayer(
                             markers: [
-                              ...ridePoints.skip(1).take(ridePoints.length - 2).map(
-                                (point) => Marker(
-                                  point: point,
-                                  width: 10,
-                                  height: 10,
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      color: Colors.orange,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(color: Colors.white, width: 1),
-                                    ),
-                                  ),
+
+                              // WAYPOINTS
+                              ...waypointsData.map((wp) => Marker(
+                                point: LatLng(wp['lat'], wp['lng']),
+                                width: 36,
+                                height: 36,
+                                child: GestureDetector(
+                                  onTap: () => _showWaypointPopup(context, wp),
+                                  child: const Icon(Icons.place, color: Colors.blue, size: 36),
                                 ),
-                              ),
+                              )),
+
+                              // POINT DE DÉPART
                               Marker(
                                 point: ridePoints.first,
                                 width: 22,
@@ -280,37 +375,35 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                                   decoration: BoxDecoration(
                                     color: Colors.black.withValues(alpha: 0.25),
                                     shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.white, width: 2),
+                                    border: Border.all(color: const Color(0xFF6D28D9), width: 2),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.greenAccent.withValues(alpha: 0.85),
+                                        color: const Color(0xFF6D28D9).withValues(alpha: 0.85),
                                         blurRadius: 8,
                                       ),
                                     ],
                                   ),
                                 ),
                               ),
+
+                              // POINT D'ARRIVÉE
                               Marker(
                                 point: ridePoints.last,
-                                width: 32,
-                                height: 32,
+                                width: 26,
+                                height: 26,
                                 child: Container(
                                   decoration: BoxDecoration(
                                     color: Colors.black.withValues(alpha: 0.25),
                                     shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.white, width: 2),
+                                    border: Border.all(color: const Color(0xFFFF8A00), width: 2),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.red.withValues(alpha: 0.85),
+                                        color: const Color(0xFFFF8A00).withValues(alpha: 0.85),
                                         blurRadius: 8,
                                       ),
                                     ],
                                   ),
-                                  child: const Icon(
-                                    Icons.sports_score_sharp,
-                                    color: Colors.white,
-                                    size: 28,
-                                  ),
+                                  child: const Icon(Icons.sports_score_sharp, color: Colors.white, size: 22),
                                 ),
                               ),
                             ],
@@ -335,8 +428,6 @@ class _RideDetailScreenState extends State<RideDetailScreen>
               ),
               child: Column(
                 children: [
-
-                  // LIGNE 1 : DÉPART / ARRIVÉE
                   Row(
                     children: [
                       Expanded(
@@ -345,10 +436,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                           children: [
                             const Text('Départ', style: TextStyle(fontSize: 11, color: Colors.white38)),
                             const SizedBox(height: 4),
-                            Text(
-                              _formatDateTime(widget.ride['startTime']),
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                            ),
+                            Text(_formatDateTime(widget.ride['startTime']), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                           ],
                         ),
                       ),
@@ -361,22 +449,16 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                             children: [
                               const Text('Arrivée', style: TextStyle(fontSize: 11, color: Colors.white38)),
                               const SizedBox(height: 4),
-                              Text(
-                                _formatDateTime(widget.ride['endTime']),
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                              ),
+                              Text(_formatDateTime(widget.ride['endTime']), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                             ],
                           ),
                         ),
                       ),
                     ],
                   ),
-
-                  const SizedBox(height: 5), // était 16
+                  const SizedBox(height: 5),
                   Container(height: 1, color: Colors.white.withValues(alpha: 0.06)),
-                  const SizedBox(height: 5), // était 16
-
-                  // LIGNE 2 : DISTANCE / DURÉE
+                  const SizedBox(height: 5),
                   Row(
                     children: [
                       Expanded(
@@ -385,10 +467,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                           children: [
                             const Text('Distance', style: TextStyle(fontSize: 11, color: Colors.white38)),
                             const SizedBox(height: 4),
-                            Text(
-                              _formatDistance(widget.ride['distanceMeters']),
-                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange),
-                            ),
+                            Text(_formatDistance(widget.ride['distanceMeters']), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange)),
                           ],
                         ),
                       ),
@@ -401,10 +480,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                             children: [
                               const Text('Durée', style: TextStyle(fontSize: 11, color: Colors.white38)),
                               const SizedBox(height: 4),
-                              Text(
-                                _formatDuration(widget.ride['durationSeconds']),
-                                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange),
-                              ),
+                              Text(_formatDuration(widget.ride['durationSeconds']), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.orange)),
                             ],
                           ),
                         ),
@@ -416,7 +492,121 @@ class _RideDetailScreenState extends State<RideDetailScreen>
             ),
           ),
 
-          // NOTE (affichée si non vide)
+          // WAYPOINTS LIST
+          if (waypointsData.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1B1B1B),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.place, color: Colors.blue, size: 16),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${waypointsData.length} point${waypointsData.length > 1 ? 's' : ''} mémorisé${waypointsData.length > 1 ? 's' : ''}',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    ...waypointsData.asMap().entries.map((entry) {
+                      final i = entry.key;
+                      final wp = entry.value;
+                      final note = (wp['note'] ?? '').toString();
+                      final photos = (wp['photos'] as List?)?.cast<String>() ?? [];
+                      return GestureDetector(
+                        onTap: () => _showWaypointPopup(context, wp),
+                        child: Container(
+                          margin: EdgeInsets.only(bottom: i < waypointsData.length - 1 ? 8 : 0),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF242424),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 28,
+                                height: 28,
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.withValues(alpha: 0.15),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    '${i + 1}',
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blue),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              if (photos.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 10),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.file(
+                                      File(photos.first),
+                                      width: 48,
+                                      height: 48,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _formatWaypointTime(wp['timestamp']),
+                                      style: const TextStyle(fontSize: 11, color: Colors.white38),
+                                    ),
+                                    if (photos.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: Text(
+                                          '${photos.length} photo${photos.length > 1 ? 's' : ''}',
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.blue,
+                                          ),
+                                        ),
+                                      ),
+                                    if (note.isNotEmpty)
+                                      Text(
+                                        note,
+                                        style: const TextStyle(fontSize: 13, color: Colors.white70),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      )
+                                    else
+                                      const Text(
+                                        'Aucune note',
+                                        style: TextStyle(fontSize: 13, color: Colors.white24, fontStyle: FontStyle.italic),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.chevron_right, color: Colors.white24, size: 18),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ),
+            ),
+
+          // NOTE SORTIE
           if (rideNote.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -432,12 +622,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                   children: [
                     const Icon(Icons.notes, color: Colors.white54, size: 18),
                     const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        rideNote,
-                        style: const TextStyle(color: Colors.white70, fontSize: 14),
-                      ),
-                    ),
+                    Expanded(child: Text(rideNote, style: const TextStyle(color: Colors.white70, fontSize: 14))),
                   ],
                 ),
               ),
@@ -453,9 +638,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                   backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(32),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
                 ),
                 onPressed: () async {
                   final confirmed = await showDialog<bool>(
@@ -464,18 +647,11 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                       return AlertDialog(
                         backgroundColor: const Color(0xFF1B1B1B),
                         title: const Text('Supprimer'),
-                        content: const Text(
-                          'Cette action supprimera définitivement la sortie ainsi que les données de sécurité associées.',
-                        ),
+                        content: const Text('Cette action supprimera définitivement la sortie ainsi que les données de sécurité associées.'),
                         actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context, false),
-                            child: const Text('Annuler'),
-                          ),
+                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
                           ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.redAccent,
-                            ),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
                             onPressed: () => Navigator.pop(context, true),
                             child: const Text('Supprimer'),
                           ),
@@ -485,12 +661,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                   );
 
                   if (confirmed == true) {
-                    await deleteRide(
-                      context,
-                      widget.ride,
-                      widget.rideKey,
-                      popAfterDelete: true,
-                    );
+                    await deleteRide(context, widget.ride, widget.rideKey, popAfterDelete: true);
                   }
                 },
                 icon: const Icon(Icons.delete),
@@ -524,10 +695,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     final file = File('${dir.path}/sortie_${DateTime.now().millisecondsSinceEpoch}.gpx');
     await file.writeAsString(buffer.toString());
 
-    await Share.shareXFiles(
-      [XFile(file.path)],
-      text: 'Trace GPX exportée depuis Sunday Tracker',
-    );
+    await Share.shareXFiles([XFile(file.path)], text: 'Trace GPX exportée depuis Sunday Tracker');
   }
 }
 
@@ -535,28 +703,43 @@ Future<void> deleteRide(
   BuildContext context,
   Map ride,
   dynamic rideKey, {bool popAfterDelete = false}) async 
-{
-  try {
-    final safetySessionId = ride['safetySessionId'];
+  {
+    try {
+      // SUPABASE
+      final safetySessionId = ride['safetySessionId'];
+      if (safetySessionId != null) {
+        final supabase = Supabase.instance.client;
+        await supabase.from('safety_positions').delete().eq('session_id', safetySessionId);
+        await supabase.from('safety_sessions').delete().eq('id', safetySessionId);
+      }
 
-    if (safetySessionId != null) {
-      final supabase = Supabase.instance.client;
-      await supabase.from('safety_positions').delete().eq('session_id', safetySessionId);
-      await supabase.from('safety_sessions').delete().eq('id', safetySessionId);
-    }
+      // PHOTOS des waypoints
+      final waypoints = (ride['waypoints'] as List?)?.cast<Map>() ?? [];
+      for (final wp in waypoints) {
+        final photos = (wp['photos'] as List?)?.cast<String>() ?? [];
+        for (final path in photos) {
+          try {
+            final file = File(path);
+            if (await file.exists()) await file.delete();
+          } catch (e) {
+            print('Erreur suppression photo $path : $e');
+          }
+        }
+      }
 
-    final ridesBox = Hive.box('rides');
-    await ridesBox.delete(rideKey);
+      // HIVE
+      final ridesBox = Hive.box('rides');
+      await ridesBox.delete(rideKey);
 
-    if (context.mounted) {
-      if (popAfterDelete) Navigator.pop(context);
+      if (context.mounted) {
+        if (popAfterDelete) Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Sortie supprimée')),
+        );
+      }
+    } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sortie supprimée')),
+        SnackBar(content: Text('Erreur suppression : $e')),
       );
     }
-  } catch (e) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Erreur suppression : $e')),
-    );
   }
-}
