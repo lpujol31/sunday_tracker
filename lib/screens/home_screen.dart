@@ -8,16 +8,127 @@ import '../widgets/ride_trace_thumbnail.dart';
 
 import 'package:intl/intl.dart';
 
-class HomeScreen extends StatefulWidget 
-{
+// ---------------------------------------------------------------------------
+// PRATIQUES — définition centralisée
+// ---------------------------------------------------------------------------
+
+const Map<String, Map<String, dynamic>> kPracticeTypes = {
+  'vtt': {
+    'label': 'VTT',
+    'color': Color(0xFF22C55E),
+    'icon': Icons.terrain,
+  },
+  'enduro': {
+    'label': 'Enduro',
+    'color': Color(0xFFEF4444),
+    'icon': Icons.electric_bolt,
+  },
+  'route': {
+    'label': 'Vélo route',
+    'color': Color(0xFF3B82F6),
+    'icon': Icons.directions_bike,
+  },
+  'marche': {
+    'label': 'Marche',
+    'color': Color(0xFFF59E0B),
+    'icon': Icons.directions_walk,
+  },
+  'running': {
+    'label': 'Running',
+    'color': Color(0xFFF97316),
+    'icon': Icons.directions_run,
+  },
+  'autre': {
+    'label': 'Autre',
+    'color': Color(0xFFA855F7),
+    'icon': Icons.more_horiz,
+  },
+};
+
+// ---------------------------------------------------------------------------
+// DÉTECTION AUTOMATIQUE DE LA PRATIQUE
+// ---------------------------------------------------------------------------
+//
+// Signaux utilisés :
+//   • avgSpeedKmh  = distanceMeters / durationSeconds * 3.6
+//   • maxSpeedKmh  = calculé depuis les points GPS si disponibles
+//   • slopeRatio   = totalElevationM / distanceKm  (dénivelé par km)
+//   • distanceKm   = distanceMeters / 1000
+//
+// Arbre de décision :
+//   avgSpeed < 8 km/h                        → marche
+//   avgSpeed < 15 km/h ET slopeRatio > 50   → running
+//   avgSpeed < 15 km/h                       → marche (lente)
+//   avgSpeed >= 25 km/h ET slopeRatio < 20  → route
+//   slopeRatio > 60 OU maxSpeed > 45        → enduro
+//   slopeRatio > 30                          → vtt
+//   avgSpeed >= 20 ET slopeRatio < 30       → autre
+//   fallback                                 → vtt
+
+String detectPractice(Map ride) {
+  final distanceM = (ride['distanceMeters'] ?? 0).toDouble();
+  final durationS = (ride['durationSeconds'] ?? 1).toDouble();
+  final elevationM = (ride['totalElevationMeters'] ?? 0).toDouble();
+
+  if (distanceM <= 0 || durationS <= 0) return 'vtt';
+
+  final distanceKm = distanceM / 1000.0;
+  final avgSpeedKmh = (distanceM / durationS) * 3.6;
+  final slopeRatio = distanceKm > 0 ? elevationM / distanceKm : 0.0;
+
+  // Calcul vitesse max depuis les points si disponibles
+  double maxSpeedKmh = 0;
+  final points = ride['points'];
+  if (points is List && points.length >= 2) {
+    for (int i = 1; i < points.length; i++) {
+      final p1 = points[i - 1];
+      final p2 = points[i];
+      if (p1 is Map && p2 is Map) {
+        final lat1 = (p1['lat'] ?? 0.0).toDouble();
+        final lon1 = (p1['lng'] ?? 0.0).toDouble();
+        final lat2 = (p2['lat'] ?? 0.0).toDouble();
+        final lon2 = (p2['lng'] ?? 0.0).toDouble();
+        final t1 = DateTime.tryParse(p1['time'] ?? '');
+        final t2 = DateTime.tryParse(p2['time'] ?? '');
+        if (t1 != null && t2 != null) {
+          final dtS = t2.difference(t1).inSeconds.toDouble();
+          if (dtS > 0) {
+            // Distance approx entre 2 points (formule haversine simplifiée)
+            final dLat = (lat2 - lat1) * 111000;
+            final dLon = (lon2 - lon1) * 111000 * 0.7; // ~cos(45°)
+            final dM = (dLat * dLat + dLon * dLon);
+            if (dM > 0) {
+              final speedKmh = (dM / (dtS * dtS)) * 0 +
+                  (((dLat.abs() + dLon.abs()) / dtS) * 3.6);
+              if (speedKmh > maxSpeedKmh) maxSpeedKmh = speedKmh;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Arbre de décision
+  if (avgSpeedKmh < 8) return 'marche';
+  if (avgSpeedKmh < 15 && slopeRatio > 50) return 'running';
+  if (avgSpeedKmh < 15) return 'marche';
+  if (avgSpeedKmh >= 25 && slopeRatio < 20) return 'route';
+  if (slopeRatio > 60 || maxSpeedKmh > 45) return 'enduro';
+  if (slopeRatio > 30) return 'vtt';
+  if (avgSpeedKmh >= 20 && slopeRatio < 30) return 'autre';
+  return 'vtt';
+}
+
+// ---------------------------------------------------------------------------
+
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> 
-{
+class _HomeScreenState extends State<HomeScreen> {
   String appVersion = '';
 
   @override
@@ -26,37 +137,20 @@ class _HomeScreenState extends State<HomeScreen>
     loadAppVersion();
   }
 
+  // -------------------------------------------------------------------------
   // FORMATAGE DE DONNEES
-  Widget buildTag(String text) 
-  {
-    final formattedText =
-        text.toLowerCase();
+  // -------------------------------------------------------------------------
 
+  Widget buildTag(String text) {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: 5,
-      ),
-
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-
-        color: Colors.orange.withValues(
-          alpha: 0.15,
-        ),
-
-        borderRadius:
-            BorderRadius.circular(20),
-
-        border: Border.all(
-          color: Colors.orange.withValues(
-            alpha: 0.3,
-          ),
-        ),
+        color: Colors.orange.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
       ),
-
       child: Text(
-        formattedText,
-
+        text.toLowerCase(),
         style: const TextStyle(
           color: Colors.orange,
           fontSize: 9,
@@ -65,14 +159,162 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
-  Future<void> loadAppVersion() async 
-  {
-    final packageInfo = await PackageInfo.fromPlatform();
 
+  /// Tag de pratique coloré + cliquable
+  Widget buildPracticeTag(
+    String practiceKey,
+    dynamic rideKey,
+    Box ridesBox,
+  ) {
+    final practice = kPracticeTypes[practiceKey] ?? kPracticeTypes['vtt']!;
+    final icon = practice['icon'] as IconData;
+    final label = practice['label'] as String;
+
+    // Couleur fixe cyan — tranche avec les tags orange et les couleurs de pratique
+    const Color tagColor = Color(0xFF06B6D4);
+
+    return GestureDetector(
+      onTap: () => _showPracticePicker(context, rideKey, ridesBox),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: tagColor.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: tagColor.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 11, color: tagColor),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: const TextStyle(
+                color: tagColor,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 3),
+            const Icon(
+              Icons.keyboard_arrow_down,
+              size: 12,
+              color: tagColor,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // SÉLECTEUR DE PRATIQUE — bottom sheet
+  // -------------------------------------------------------------------------
+
+  void _showPracticePicker(
+    BuildContext context,
+    dynamic rideKey,
+    Box ridesBox,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1B1B1B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Poignée
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const Text(
+                'Choisir la pratique',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Détectée automatiquement · modifiable',
+                style: TextStyle(fontSize: 11, color: Colors.white38),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: kPracticeTypes.entries.map((e) {
+                  final color = e.value['color'] as Color;
+                  final icon = e.value['icon'] as IconData;
+                  final label = e.value['label'] as String;
+
+                  return GestureDetector(
+                    onTap: () async {
+                      // Lire la ride existante et y ajouter la pratique
+                      final existing =
+                          ridesBox.get(rideKey) as Map? ?? {};
+                      final updated = Map.from(existing)
+                        ..['practice'] = e.key;
+                      await ridesBox.put(rideKey, updated);
+                      if (context.mounted) Navigator.pop(context);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(20),
+                        border:
+                            Border.all(color: color.withValues(alpha: 0.5)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(icon, size: 16, color: color),
+                          const SizedBox(width: 6),
+                          Text(
+                            label,
+                            style: TextStyle(
+                              color: color,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+
+  Future<void> loadAppVersion() async {
+    final packageInfo = await PackageInfo.fromPlatform();
     final formattedDate = packageInfo.updateTime != null
         ? DateFormat('dd/MM/yyyy HH:mm').format(packageInfo.updateTime!)
         : null;
-
     setState(() {
       appVersion =
           'v${packageInfo.version}+${packageInfo.buildNumber}'
@@ -80,32 +322,40 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
-  String formatDistance(dynamic meters) 
-  {
+  String formatDistance(dynamic meters) {
     final distance = (meters ?? 0).toDouble();
-
-    if (distance < 1000) {
-      return '${distance.toStringAsFixed(0)} m';
-    }
-
+    if (distance < 1000) return '${distance.toStringAsFixed(0)} m';
     return '${(distance / 1000).toStringAsFixed(2)} km';
   }
 
-  String formatDuration(dynamic seconds) 
-  {
+  String formatDuration(dynamic seconds) {
     final duration = Duration(seconds: seconds ?? 0);
     return duration.toString().split('.').first;
   }
 
+  // -------------------------------------------------------------------------
+  // DELETE
+  // -------------------------------------------------------------------------
+
+  Future<void> deleteRide(
+      BuildContext context, Map ride, dynamic rideKey) async {
+    final ridesBox = Hive.box('rides');
+    await ridesBox.delete(rideKey);
+  }
+
+  // -------------------------------------------------------------------------
+  // BUILD
+  // -------------------------------------------------------------------------
+
   @override
-  Widget build(BuildContext context) 
-  {
+  Widget build(BuildContext context) {
     final ridesBox = Hive.box('rides');
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0D0D0D),
+        toolbarHeight: 70,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -144,24 +394,22 @@ class _HomeScreenState extends State<HomeScreen>
             ),
             const Text(
               'Prêt pour une nouvelle aventure ?',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.white,
-              ),
+              style: TextStyle(fontSize: 12, color: Colors.white),
             ),
           ],
         ),
-        toolbarHeight: 70,
-      ),      
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // ----------------------------------------------------------------
+            // BOUTON START RIDE
+            // ----------------------------------------------------------------
             SizedBox(
               width: double.infinity,
               height: 108,
-              child: 
-              GestureDetector(
+              child: GestureDetector(
                 onTap: () {
                   Navigator.push(
                     context,
@@ -213,9 +461,7 @@ class _HomeScreenState extends State<HomeScreen>
                             size: 48,
                           ),
                         ),
-
                         const SizedBox(width: 24),
-
                         const Expanded(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -236,7 +482,6 @@ class _HomeScreenState extends State<HomeScreen>
                             ],
                           ),
                         ),
-
                         const Icon(
                           Icons.arrow_forward_rounded,
                           color: Colors.white,
@@ -246,7 +491,7 @@ class _HomeScreenState extends State<HomeScreen>
                     ),
                   ),
                 ),
-              )
+              ),
             ),
 
             const SizedBox(height: 20),
@@ -260,8 +505,11 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ),
             ),
-
             const SizedBox(height: 16),
+
+            // ----------------------------------------------------------------
+            // LISTE DES SORTIES
+            // ----------------------------------------------------------------
             Expanded(
               child: ValueListenableBuilder(
                 valueListenable: ridesBox.listenable(),
@@ -272,28 +520,23 @@ class _HomeScreenState extends State<HomeScreen>
                     );
                   }
 
-                  final rides = List.generate(
-                    box.length,
-                    (index) {
-                      final ride = box.getAt(index);
-                      return {
-                        'key': box.keyAt(index),
-                        'ride': ride,
-                      };
-                    },
-                  );
+                  final rides = List.generate(box.length, (index) {
+                    final ride = box.getAt(index);
+                    return {
+                      'key': box.keyAt(index),
+                      'ride': ride,
+                    };
+                  });
 
                   rides.sort((a, b) {
                     final rideA = a['ride'] as Map;
                     final rideB = b['ride'] as Map;
-
                     final dateA =
                         DateTime.tryParse(rideA['startTime'] ?? '') ??
                             DateTime(1900);
                     final dateB =
                         DateTime.tryParse(rideB['startTime'] ?? '') ??
                             DateTime(1900);
-
                     return dateB.compareTo(dateA);
                   });
 
@@ -304,9 +547,7 @@ class _HomeScreenState extends State<HomeScreen>
                       final rideKey = item['key'];
                       final ride = item['ride'] as Map;
 
-                      final startDate =
-                          DateTime.tryParse(ride['startTime'] ?? '') ??
-                              DateTime.now();
+                      final startDate = (DateTime.tryParse(ride['startTime'] ?? '') ?? DateTime.now()).toLocal();
 
                       final formattedDate =
                           '${startDate.day.toString().padLeft(2, '0')}/'
@@ -314,6 +555,13 @@ class _HomeScreenState extends State<HomeScreen>
                           '${startDate.year} '
                           '${startDate.hour.toString().padLeft(2, '0')}:'
                           '${startDate.minute.toString().padLeft(2, '0')}';
+
+                      // ── Pratique : stockée dans Hive ou détectée auto ──
+                      final practiceKey = (ride['practice'] as String?)
+                              ?.isNotEmpty ==
+                          true
+                          ? ride['practice'] as String
+                          : detectPractice(ride);
 
                       return Dismissible(
                         key: ValueKey(rideKey),
@@ -360,11 +608,7 @@ class _HomeScreenState extends State<HomeScreen>
                           );
                         },
                         onDismissed: (direction) async {
-                          await deleteRide(
-                            context,
-                            ride,
-                            rideKey,
-                          );
+                          await deleteRide(context, ride, rideKey);
                         },
                         child: GestureDetector(
                           onTap: () {
@@ -388,15 +632,13 @@ class _HomeScreenState extends State<HomeScreen>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-
                                 Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
                                   children: [
-
                                     RideTraceThumbnail(
                                       points: ride['points'] ?? [],
                                     ),
-
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Column(
@@ -406,31 +648,46 @@ class _HomeScreenState extends State<HomeScreen>
                                           Row(
                                             children: [
                                               Expanded(
-                                                child: Text(
-                                                  ride['name'] ?? '$formattedDate',
-                                                  maxLines: 2,
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 15,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      ride['name'] ?? formattedDate,
+                                                      maxLines: 2,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: const TextStyle(
+                                                        fontSize: 15,
+                                                        fontWeight: FontWeight.bold,
+                                                      ),
+                                                    ),
+                                                    if (ride['name'] != null &&
+                                                        ride['name'].toString().isNotEmpty) ...[
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        formattedDate,
+                                                        style: const TextStyle(
+                                                          fontSize: 11,
+                                                          color: Colors.white38,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ],
                                                 ),
                                               ),
                                             ],
                                           ),
-
                                           const SizedBox(height: 5),
                                           Wrap(
                                             spacing: 2,
                                             runSpacing: 4,
-                                            crossAxisAlignment: WrapCrossAlignment.center,
+                                            crossAxisAlignment:
+                                                WrapCrossAlignment.center,
                                             children: [
                                               const Icon(
                                                 Icons.timer,
                                                 size: 16,
                                                 color: Colors.white60,
                                               ),
-
                                               Text(
                                                 formatDuration(
                                                   ride['durationSeconds'],
@@ -439,13 +696,11 @@ class _HomeScreenState extends State<HomeScreen>
                                                   color: Colors.white70,
                                                 ),
                                               ),
-
                                               const Icon(
                                                 Icons.route,
                                                 size: 16,
                                                 color: Colors.white60,
                                               ),
-
                                               Text(
                                                 formatDistance(
                                                   ride['distanceMeters'],
@@ -456,27 +711,38 @@ class _HomeScreenState extends State<HomeScreen>
                                               ),
                                             ],
                                           ),
-                                          const SizedBox(height: 5),
-                                          Wrap(
-                                            spacing: 2,
-                                            runSpacing: 4,
-                                            crossAxisAlignment: WrapCrossAlignment.center,
-                                            children: [
-                                              if ((ride['note'] ?? '').toString().isNotEmpty) ...[
-                                                const SizedBox(width: 0),
+                                          // APRÈS
+                                          if ((ride['note'] ?? '').toString().isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            // Ajouter un Row avec une petite icône devant
+                                            Row(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
                                                 const Icon(
-                                                  Icons.notes_rounded,
-                                                  size: 22,
+                                                  Icons.edit_note_rounded,
+                                                  size: 14,
                                                   color: Colors.orange,
                                                 ),
+                                                const SizedBox(width: 4),
+                                                Expanded(
+                                                  child: Text(
+                                                    (ride['note'] as String).trim(),
+                                                    maxLines: 2,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      fontSize: 12,
+                                                      color: Colors.orange,
+                                                      fontStyle: FontStyle.italic,
+                                                      height: 1.4,
+                                                    ),
+                                                  ),
+                                                ),
                                               ],
-                                            ],
-                                          ),
-
+                                            ),                                            
+                                          ],                                          
                                         ],
                                       ),
                                     ),
-
                                     const SizedBox(width: 5),
                                     const Icon(
                                       Icons.chevron_right,
@@ -488,31 +754,32 @@ class _HomeScreenState extends State<HomeScreen>
 
                                 const SizedBox(height: 14),
 
+                                // ── Tags géo + tag pratique ──
                                 Wrap(
                                   spacing: 6,
                                   runSpacing: 6,
                                   children: [
+                                    // Tag pratique — en premier, coloré
+                                    buildPracticeTag(
+                                      practiceKey,
+                                      rideKey,
+                                      ridesBox,
+                                    ),
 
                                     if ((ride['department'] ?? '')
                                         .toString()
                                         .isNotEmpty)
-                                      buildTag(
-                                        '#${ride['department']}',
-                                      ),
+                                      buildTag('#${ride['department']}'),
 
                                     if ((ride['region'] ?? '')
                                         .toString()
                                         .isNotEmpty)
-                                      buildTag(
-                                        '#${ride['region']}',
-                                      ),
+                                      buildTag('#${ride['region']}'),
 
                                     if ((ride['city'] ?? '')
                                         .toString()
                                         .isNotEmpty)
-                                      buildTag(
-                                        '#${ride['city']}',
-                                      ),
+                                      buildTag('#${ride['city']}'),
                                   ],
                                 ),
                               ],

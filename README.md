@@ -28,8 +28,6 @@ https://supabase.com/dashboard/org/stxrbgomsaywwrksojfg
 https://eltlnrxiuvixjlakjfhz.supabase.co
 
 ## Backlog
-### v1
-
 #### Bugs
 
 #### Accueil
@@ -37,21 +35,4 @@ https://eltlnrxiuvixjlakjfhz.supabase.co
 #### Ride in progress
 
 #### Détail sortie
-
-
-### v2
-
-
-#### Accueil
-Preview avec fond de carte
-
-#### Ride in progress
-
-Gérer bouton SOS
-
-#### Détail sortie
-
-
-### Ideas
-Commandes guidon (prise de WP, photos)
 
