@@ -31,7 +31,7 @@
     </queries>
 
     <application
-        android:label="sunday_tracker"
+        android:label="Sunday Tracker"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

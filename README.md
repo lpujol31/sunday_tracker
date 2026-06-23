@@ -27,12 +27,43 @@ adb -s R5CR910WZTX shell run-as com.example.sunday_tracker rm app_flutter/waypoi
 https://supabase.com/dashboard/org/stxrbgomsaywwrksojfg
 https://eltlnrxiuvixjlakjfhz.supabase.co
 
-## Backlog
-#### Bugs
+## Hive
+### Structure
+| Clé                    | Type probable                     |
+| ---------------------- | --------------------------------- |
+| `name`                 | `String`                          |
+| `startTime`            | `String?` (date ISO8601)          |
+| `endTime`              | `String` (date ISO8601)           |
+| `durationSeconds`      | `int`                             |
+| `distanceMeters`       | `double` ou `int`                 |
+| `totalElevationMeters` | `double`                          |
+| `totalElevationDown`   | `double`                          |
+| `altitudeStart`        | `double?`                         |
+| `altitudeEnd`          | `double?`                         |
+| `altitudeMax`          | `double?`                         |
+| `altitudeMin`          | `double?`                         |
+| `movingTimeSeconds`    | `int`                             |
+| `maxSpeedKmh`          | `double`                          |
+| `avgSpeedKmh`          | `double`                          |
+| `maxSlopePercent`      | `double`                          |
+| `weatherStart`         | `Map` ou objet sérialisé          |
+| `weatherEnd`           | `Map` ou objet sérialisé          |
+| `sunriseTime`          | `String?` (date ISO8601)          |
+| `sunsetTime`           | `String?` (date ISO8601)          |
+| `city`                 | `String?`                         |
+| `department`           | `String?`                         |
+| `region`               | `String?`                         |
+| `safetySessionId`      | `String?`                         |
+| `safetyShareCode`      | `String?`                         |
+| `points`               | `List` (points GPS avec altitude) |
+| `waypoints`            | `List`                            |
 
-#### Accueil
-
-#### Ride in progress
-
-#### Détail sortie
-
+### Recherche
+Un seul champ de recherche qui cherche dans :
+name
+note
+city (tags)
+department (tags)
+region (tags)
+practice (tags)
+startTime / ex : 2026

@@ -21,8 +21,8 @@ class RideTraceThumbnail extends StatelessWidget {
     }).toList();
 
     return Container(
-    width: 90,
-    height: 72,
+    width: 75,
+    height: 60,
       decoration: BoxDecoration(
         color: const Color(0xFF101418),
         borderRadius: BorderRadius.circular(16),
