@@ -789,8 +789,8 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
 
     switch (item.type) {
       case _PassageType.start:
-        dotColor = const Color(0xFF4ade80);
-        dotChild = const Icon(Icons.play_arrow_rounded, size: 12, color: Color(0xFF4ade80));
+        dotColor = const Color(0xFFFF8A00);
+        dotChild = const Icon(Icons.play_arrow_rounded, size: 12, color: Color(0xFFFF8A00));
         title = 'Départ';
         break;
       case _PassageType.end:

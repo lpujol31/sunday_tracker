@@ -69,6 +69,7 @@ class _IsolatedMap extends StatelessWidget {
   final void Function(MapEvent)? onMapEvent;
 
   const _IsolatedMap({
+    super.key,
     required this.mapController,
     required this.mapStyleIndex,
     required this.mapStyles,
@@ -177,6 +178,9 @@ class _RideScreenState extends State<RideScreen> {
   StreamSubscription<Position>? positionStream;
   StreamSubscription<Position>? gpsInitializationStream;
   final MapController mapController = MapController();
+  // Clé stable pour _IsolatedMap : permet le reparentage sans démontage/remontage,
+  // évitant le setState-during-build quand la carte change de position dans l'arbre.
+  final GlobalKey _mapKey = GlobalKey();
   bool mapReady = false;
   final List<LatLng> ridePoints = [];
 
@@ -656,8 +660,7 @@ class _RideScreenState extends State<RideScreen> {
     _saveBlockPrefs();
   }
 
-  bool get _allBlocksCollapsed =>
-      _collapsedBlocks.length == _validBlockIds.length;
+
   bool _isCollapsed(String id) => _collapsedBlocks.contains(id);
 
   // ── Header générique avec poignée drag ───────────────────────
@@ -1626,7 +1629,7 @@ class _RideScreenState extends State<RideScreen> {
   // RIDE
   // ═══════════════════════════════════════════════════════════════
   Future<void> startRide({bool shareLink = false}) async {
-    setState(() { rideIsStarted = true; });
+    setState(() { rideIsStarted = true; _mapFullscreen = true; });
     await gpsInitializationStream?.cancel();
     gpsInitializationStream = null;
     if (_weatherFetched) _weatherSnapshotStart = _currentWeatherSnapshot();
@@ -2826,6 +2829,7 @@ class _RideScreenState extends State<RideScreen> {
 
   Widget _buildFlutterMap() {
     return _IsolatedMap(
+      key: _mapKey,
       mapController: mapController,
       mapStyleIndex: _mapStyleIndex,
       mapStyles: _mapStyles,
@@ -2928,38 +2932,35 @@ class _RideScreenState extends State<RideScreen> {
                     }
                   },
                   child: Container(
-                    width: 36,
-                    height: 36,
+                    width: 56,
+                    height: 56,
                     decoration: BoxDecoration(
                       color: _followPosition
                           ? const Color(0xFF29B6F6)
-                          : Colors.black.withValues(alpha: 0.65),
-                      borderRadius: BorderRadius.circular(10),
+                          : Colors.black.withValues(alpha: 0.75),
+                      borderRadius: BorderRadius.circular(16),
                     ),
-                    child: Icon(
+                    child: const Icon(
                       Icons.my_location,
                       color: Colors.white,
-                      size: 20,
+                      size: 26,
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 10),
                 GestureDetector(
                   onTap: () => setState(() => _mapFullscreen = !_mapFullscreen),
                   child: Container(
-                    width: 36,
-                    height: 36,
+                    width: 56,
+                    height: 56,
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.65),
-                      borderRadius: BorderRadius.circular(10),
-                      border: _mapFullscreen
-                          ? Border.all(color: const Color(0xFFFFA726), width: 1.5)
-                          : null,
+                      color: Colors.black.withValues(alpha: 0.75),
+                      borderRadius: BorderRadius.circular(16),
                     ),
                     child: Icon(
                       _mapFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                      color: _mapFullscreen ? const Color(0xFFFFA726) : Colors.white,
-                      size: 22,
+                      color: Colors.white,
+                      size: 26,
                     ),
                   ),
                 ),
@@ -2968,6 +2969,501 @@ class _RideScreenState extends State<RideScreen> {
           ),
         ],
       ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // COCKPIT MODE
+  // ═══════════════════════════════════════════════════════════════
+
+  Widget _buildCockpitBanner({double topInset = 0}) {
+    final now = DateTime.now();
+    final timeStr =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final durationStr = rideDuration.inHours > 0
+        ? formattedDuration()
+        : '${(rideDuration.inMinutes % 60).toString().padLeft(2, '0')}:'
+            '${(rideDuration.inSeconds % 60).toString().padLeft(2, '0')}';
+
+    // DefaultTextStyle peut hériter un soulignement jaune du parent — on coupe ça ici.
+    const noUnderline = TextDecoration.none;
+    const labelStyle = TextStyle(
+      fontSize: 11,
+      color: Color(0xFF7A7A7A),
+      decoration: noUnderline,
+      fontWeight: FontWeight.w400,
+    );
+
+    final isEdgeToEdge = topInset > 0;
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, topInset + 10, 16, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xF2101010),
+        borderRadius: isEdgeToEdge
+            ? const BorderRadius.vertical(bottom: Radius.circular(20))
+            : BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08), width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.45),
+            blurRadius: 16,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: DefaultTextStyle(
+        style: const TextStyle(decoration: noUnderline),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Heure
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    timeStr,
+                    maxLines: 1,
+                    overflow: TextOverflow.clip,
+                    style: const TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      height: 1.0,
+                      letterSpacing: -1.0,
+                      decoration: noUnderline,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text('heure', style: labelStyle),
+                ],
+              ),
+            ),
+
+            Container(
+              width: 1,
+              height: 28,
+              margin: const EdgeInsets.symmetric(horizontal: 10),
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+
+            // Distance
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    formattedDistance(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      height: 1.0,
+                      letterSpacing: -0.5,
+                      decoration: noUnderline,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text('Distance', style: labelStyle, textAlign: TextAlign.center),
+                ],
+              ),
+            ),
+
+            Container(
+              width: 1,
+              height: 28,
+              margin: const EdgeInsets.symmetric(horizontal: 10),
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+
+            // Durée
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    durationStr,
+                    maxLines: 1,
+                    overflow: TextOverflow.clip,
+                    style: const TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      height: 1.0,
+                      letterSpacing: -0.5,
+                      decoration: noUnderline,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text('Durée', style: labelStyle),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCockpitMapButtons({double topOffset = 108}) {
+    return Positioned(
+      top: topOffset,
+      right: 12,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: () {
+              if (_followPosition) {
+                setState(() => _followPosition = false);
+              } else {
+                final lat = double.tryParse(latitude);
+                final lng = double.tryParse(longitude);
+                if (lat != null && lng != null) {
+                  mapController.move(LatLng(lat, lng), mapController.camera.zoom);
+                }
+                setState(() => _followPosition = true);
+              }
+            },
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: _followPosition
+                    ? const Color(0xFF29B6F6)
+                    : Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: const Icon(Icons.my_location, color: Colors.white, size: 26),
+            ),
+          ),
+          const SizedBox(height: 10),
+          GestureDetector(
+            onTap: () => setState(() => _mapFullscreen = !_mapFullscreen),
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Icon(
+                _mapFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                color: Colors.white,
+                size: 26,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          GestureDetector(
+            onTap: () {
+              final next = (_mapStyleIndex + 1) % _mapStyles.length;
+              setState(() => _mapStyleIndex = next);
+              _saveMapStyle(next);
+            },
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    _mapStyles[_mapStyleIndex]['icon'] as IconData,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _mapStyles[_mapStyleIndex]['label'] as String,
+                    style: const TextStyle(
+                      fontSize: 9,
+                      color: Colors.white70,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCockpitControls() {
+    final bottomPad = MediaQuery.of(context).padding.bottom;
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF0D0D0D),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(12, 0, 12, 12 + bottomPad),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: _showDetailSheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E1E1E),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.keyboard_arrow_up, color: Colors.white54, size: 16),
+                      SizedBox(width: 5),
+                      Text(
+                        'Détails',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white60,
+                          fontWeight: FontWeight.w500,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: rideIsPaused ? Colors.green : Colors.blue,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+              ),
+              onPressed: togglePauseRide,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      rideIsPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
+                      color: Colors.white,
+                      size: 26,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Text(
+                    rideIsPaused ? 'Reprendre' : 'Pause',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _buildCockpitActionBtn(
+                  icon: Icons.stop,
+                  iconColor: Colors.red,
+                  label: 'Arrêter',
+                  bg: const Color(0xFF1A1A1A),
+                  onTap: () async {
+                    await stopTrackingImmediately();
+                    await _showExitRideModal();
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildCockpitActionBtn(
+                  icon: Icons.place,
+                  iconColor: Colors.blue,
+                  label: 'Waypoint',
+                  bg: const Color(0xFF1A1A1A),
+                  onTap: _showAddWaypointModal,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildCockpitActionBtn(
+                  icon: Icons.emergency,
+                  iconColor: Colors.white,
+                  label: 'SOS',
+                  bg: Colors.red,
+                  onTap: () {},
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCockpitActionBtn({
+    required IconData icon,
+    required Color iconColor,
+    required String label,
+    required Color bg,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: bg == Colors.red
+                    ? Colors.white.withValues(alpha: 0.2)
+                    : iconColor.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: iconColor, size: 17),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: bg == Colors.red ? Colors.white : Colors.white70,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDetailSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        minChildSize: 0.35,
+        expand: false,
+        builder: (ctx, scrollController) => Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF0D0D0D),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: CustomScrollView(
+            controller: scrollController,
+            slivers: [
+              SliverToBoxAdapter(
+                child: Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    margin: const EdgeInsets.symmetric(vertical: 14),
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                  child: _buildNotificationZone(),
+                ),
+              ),
+              SliverReorderableList(
+                itemCount: _blockIds.length,
+                onReorder: _onBlockReorder,
+                itemBuilder: (context, index) {
+                  final id = _blockIds[index];
+                  if (id == 'sun' || id == 'dist') {
+                    return SizedBox.shrink(key: ValueKey(id));
+                  }
+                  Widget child;
+                  if (id == 'weather') {
+                    final sunIdx = _blockIds.indexOf('sun');
+                    final first = sunIdx < index ? 'sun' : 'weather';
+                    final second = sunIdx < index ? 'weather' : 'sun';
+                    child = Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: _buildBlockById(first, index: index)),
+                          const SizedBox(width: 6),
+                          Expanded(child: _buildBlockById(second, index: index)),
+                        ],
+                      ),
+                    );
+                  } else if (id == 'duree') {
+                    final distIdx = _blockIds.indexOf('dist');
+                    final first = distIdx < index ? 'dist' : 'duree';
+                    final second = distIdx < index ? 'duree' : 'dist';
+                    child = Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: _buildBlockById(first, index: index)),
+                          const SizedBox(width: 6),
+                          Expanded(child: _buildBlockById(second, index: index)),
+                        ],
+                      ),
+                    );
+                  } else {
+                    child = Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                      child: _buildBlockById(id, index: index),
+                    );
+                  }
+                  return Material(
+                    key: ValueKey(id),
+                    color: Colors.transparent,
+                    child: child,
+                  );
+                },
+              ),
+              const SliverToBoxAdapter(child: SizedBox(height: 40)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -3101,389 +3597,22 @@ class _RideScreenState extends State<RideScreen> {
                           ),
                         )
                       else
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 280),
-                          curve: Curves.easeInOut,
-                          height: _mapCollapsed
-                              ? 32
-                              : (_allBlocksCollapsed ? 300 : 200),
-                          child: Stack(
-                            clipBehavior: Clip.hardEdge,
-                            children: [
-                              if (!_mapFullscreen) _buildFlutterMap(),
-                              if (!_mapFullscreen) _buildMapOverlay(),
-                            ],
-                          ),
-                        ),
-
-                      if (rideIsStarted)
                         Expanded(
                           child: Stack(
                             children: [
-                              Column(
-                                children: [
-                                  Expanded(
-                                    child: CustomScrollView(
-                                      slivers: [
-                                        SliverToBoxAdapter(
-                                          child: Padding(
-                                            padding: const EdgeInsets.fromLTRB(
-                                              12,
-                                              8,
-                                              12,
-                                              6,
-                                            ),
-                                            child: _buildNotificationZone(),
-                                          ),
-                                        ),
-
-                                        SliverReorderableList(
-                                          itemCount: _blockIds.length,
-                                          onReorder: _onBlockReorder,
-                                          itemBuilder: (context, index) {
-                                            final id = _blockIds[index];
-                                            if (id == 'sun' || id == 'dist') {
-                                              return SizedBox.shrink(
-                                                key: ValueKey(id),
-                                              );
-                                            }
-                                            Widget child;
-                                            if (id == 'weather') {
-                                              final sunIdx = _blockIds.indexOf(
-                                                'sun',
-                                              );
-                                              final first = sunIdx < index
-                                                  ? 'sun'
-                                                  : 'weather';
-                                              final second = sunIdx < index
-                                                  ? 'weather'
-                                                  : 'sun';
-                                              child = Padding(
-                                                padding:
-                                                    const EdgeInsets.fromLTRB(
-                                                      12,
-                                                      0,
-                                                      12,
-                                                      6,
-                                                    ),
-                                                child: Row(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    Expanded(
-                                                      child: _buildBlockById(
-                                                        first,
-                                                        index: index,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(width: 6),
-                                                    Expanded(
-                                                      child: _buildBlockById(
-                                                        second,
-                                                        index: index,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              );
-                                            } else if (id == 'duree') {
-                                              final distIdx = _blockIds.indexOf(
-                                                'dist',
-                                              );
-                                              final first = distIdx < index
-                                                  ? 'dist'
-                                                  : 'duree';
-                                              final second = distIdx < index
-                                                  ? 'duree'
-                                                  : 'dist';
-                                              child = Padding(
-                                                padding:
-                                                    const EdgeInsets.fromLTRB(
-                                                      12,
-                                                      0,
-                                                      12,
-                                                      6,
-                                                    ),
-                                                child: Row(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    Expanded(
-                                                      child: _buildBlockById(
-                                                        first,
-                                                        index: index,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(width: 6),
-                                                    Expanded(
-                                                      child: _buildBlockById(
-                                                        second,
-                                                        index: index,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              );
-                                            } else {
-                                              child = Padding(
-                                                padding:
-                                                    const EdgeInsets.fromLTRB(
-                                                      12,
-                                                      0,
-                                                      12,
-                                                      6,
-                                                    ),
-                                                child: _buildBlockById(
-                                                  id,
-                                                  index: index,
-                                                ),
-                                              );
-                                            }
-                                            return Material(
-                                              key: ValueKey(id),
-                                              color: Colors.transparent,
-                                              child: child,
-                                            );
-                                          },
-                                        ),
-
-                                        const SliverToBoxAdapter(
-                                          child: SizedBox(height: 8),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      6,
-                                      12,
-                                      8,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        SizedBox(
-                                          width: double.infinity,
-                                          child: ElevatedButton(
-                                            style: ElevatedButton.styleFrom(
-                                              backgroundColor: rideIsPaused
-                                                  ? Colors.green
-                                                  : Colors.blue,
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    vertical: 9,
-                                                  ),
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(18),
-                                              ),
-                                            ),
-                                            onPressed: togglePauseRide,
-                                            child: Row(
-                                              mainAxisAlignment:
-                                                  MainAxisAlignment.center,
-                                              children: [
-                                                Container(
-                                                  width: 36,
-                                                  height: 36,
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.white
-                                                        .withValues(alpha: 0.2),
-                                                    shape: BoxShape.circle,
-                                                  ),
-                                                  child: Icon(
-                                                    rideIsPaused
-                                                        ? Icons
-                                                              .play_arrow_rounded
-                                                        : Icons.pause_rounded,
-                                                    color: Colors.white,
-                                                    size: 22,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 12),
-                                                Text(
-                                                  rideIsPaused
-                                                      ? 'Reprendre'
-                                                      : 'Pause',
-                                                  style: const TextStyle(
-                                                    fontSize: 18,
-                                                    fontWeight: FontWeight.bold,
-                                                    color: Colors.white,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: ElevatedButton(
-                                                style: ElevatedButton.styleFrom(
-                                                  backgroundColor: const Color(
-                                                    0xFF1A1A1A,
-                                                  ),
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        vertical: 7,
-                                                      ),
-                                                  shape: RoundedRectangleBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          16,
-                                                        ),
-                                                  ),
-                                                ),
-                                                onPressed: () async {
-                                                  await stopTrackingImmediately();
-                                                  await _showExitRideModal();
-                                                },
-                                                child: Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Container(
-                                                      width: 26,
-                                                      height: 26,
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.red
-                                                            .withValues(
-                                                              alpha: 0.15,
-                                                            ),
-                                                        shape: BoxShape.circle,
-                                                      ),
-                                                      child: const Icon(
-                                                        Icons.stop,
-                                                        color: Colors.red,
-                                                        size: 15,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(height: 3),
-                                                    const Text(
-                                                      'Arrêter',
-                                                      style: TextStyle(
-                                                        fontSize: 11,
-                                                        fontWeight:
-                                                            FontWeight.bold,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: ElevatedButton(
-                                                style: ElevatedButton.styleFrom(
-                                                  backgroundColor: const Color(
-                                                    0xFF1A1A1A,
-                                                  ),
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        vertical: 7,
-                                                      ),
-                                                  shape: RoundedRectangleBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          16,
-                                                        ),
-                                                  ),
-                                                ),
-                                                onPressed:
-                                                    _showAddWaypointModal,
-                                                child: Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Container(
-                                                      width: 26,
-                                                      height: 26,
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.blue
-                                                            .withValues(
-                                                              alpha: 0.15,
-                                                            ),
-                                                        shape: BoxShape.circle,
-                                                      ),
-                                                      child: const Icon(
-                                                        Icons.place,
-                                                        color: Colors.blue,
-                                                        size: 15,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(height: 3),
-                                                    const Text(
-                                                      'Waypoint',
-                                                      style: TextStyle(
-                                                        fontSize: 11,
-                                                        fontWeight:
-                                                            FontWeight.bold,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: ElevatedButton(
-                                                style: ElevatedButton.styleFrom(
-                                                  backgroundColor: Colors.red,
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        vertical: 7,
-                                                      ),
-                                                  shape: RoundedRectangleBorder(
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          16,
-                                                        ),
-                                                  ),
-                                                ),
-                                                onPressed: () {},
-                                                child: Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Container(
-                                                      width: 26,
-                                                      height: 26,
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.white
-                                                            .withValues(
-                                                              alpha: 0.2,
-                                                            ),
-                                                        shape: BoxShape.circle,
-                                                      ),
-                                                      child: const Icon(
-                                                        Icons.emergency,
-                                                        color: Colors.white,
-                                                        size: 15,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(height: 3),
-                                                    const Text(
-                                                      'SOS',
-                                                      style: TextStyle(
-                                                        fontSize: 11,
-                                                        fontWeight:
-                                                            FontWeight.bold,
-                                                        color: Colors.white,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
+                              if (!_mapFullscreen) Positioned.fill(child: _buildFlutterMap()),
+                              _buildCockpitMapButtons(),
+                              Positioned(
+                                top: 12,
+                                left: 12,
+                                right: 12,
+                                child: _buildCockpitBanner(),
+                              ),
+                              Positioned(
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                child: _buildCockpitControls(),
                               ),
                             ],
                           ),
@@ -3568,16 +3697,17 @@ class _RideScreenState extends State<RideScreen> {
 
           if (_mapFullscreen)
             Positioned.fill(
-              child: Stack(
-                clipBehavior: Clip.hardEdge,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Stack(
+                  clipBehavior: Clip.hardEdge,
                 children: [
-                  // ← Seule instance de carte montée pendant le plein écran
-                  //   (la version réduite est masquée juste au-dessus).
+                  // Seule instance de carte en plein écran.
                   _buildFlutterMap(),
-                  _buildMapOverlay(),
 
-                  // ← Boutons flottants au-dessus de la carte
-                  if (!rideIsStarted)
+                  if (!rideIsStarted) ...[
+                    // Avant le ride : overlay standard + bouton démarrer
+                    _buildMapOverlay(),
                     Positioned(
                       left: 12,
                       right: 12,
@@ -3585,84 +3715,22 @@ class _RideScreenState extends State<RideScreen> {
                       child: Material(
                         color: Colors.transparent,
                         child: GestureDetector(
-                        onTap: gpsIsReady ? _showStartRideSheet : null,
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 300),
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          decoration: BoxDecoration(
-                            color: gpsIsReady ? null : const Color(0xFF1A1A1A),
-                            gradient: gpsIsReady
-                                ? const LinearGradient(
-                                    colors: [
-                                      Color(0xFF00C853),
-                                      Color(0xFF00897B),
-                                    ],
-                                    begin: Alignment.centerLeft,
-                                    end: Alignment.centerRight,
-                                  )
-                                : null,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Container(
-                                width: 36,
-                                height: 36,
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.2),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  gpsIsReady
-                                      ? Icons.play_arrow_rounded
-                                      : Icons.hourglass_empty,
-                                  color: Colors.white,
-                                  size: 24,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                gpsIsReady
-                                    ? 'Démarrer la sortie'
-                                    : 'Attente du signal GPS…',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: gpsIsReady
-                                      ? Colors.white
-                                      : Colors.white38,
-                                  letterSpacing: 0.3,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      ),
-                    )
-                  else
-                  Positioned(
-                    left: 12,
-                    right: 12,
-                    bottom: 16 + MediaQuery.of(context).padding.bottom,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: rideIsPaused
-                                  ? Colors.green
-                                  : Colors.blue,
-                              padding: const EdgeInsets.symmetric(vertical: 9),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18),
-                              ),
+                          onTap: gpsIsReady ? _showStartRideSheet : null,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 300),
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            decoration: BoxDecoration(
+                              color: gpsIsReady ? null : const Color(0xFF1A1A1A),
+                              gradient: gpsIsReady
+                                  ? const LinearGradient(
+                                      colors: [Color(0xFF00C853), Color(0xFF00897B)],
+                                      begin: Alignment.centerLeft,
+                                      end: Alignment.centerRight,
+                                    )
+                                  : null,
+                              borderRadius: BorderRadius.circular(20),
                             ),
-                            onPressed: togglePauseRide,
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
@@ -3674,173 +3742,51 @@ class _RideScreenState extends State<RideScreen> {
                                     shape: BoxShape.circle,
                                   ),
                                   child: Icon(
-                                    rideIsPaused
-                                        ? Icons.play_arrow_rounded
-                                        : Icons.pause_rounded,
+                                    gpsIsReady ? Icons.play_arrow_rounded : Icons.hourglass_empty,
                                     color: Colors.white,
-                                    size: 22,
+                                    size: 24,
                                   ),
                                 ),
                                 const SizedBox(width: 12),
                                 Text(
-                                  rideIsPaused ? 'Reprendre' : 'Pause',
-                                  style: const TextStyle(
+                                  gpsIsReady ? 'Démarrer la sortie' : 'Attente du signal GPS…',
+                                  style: TextStyle(
                                     fontSize: 18,
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.white,
+                                    color: gpsIsReady ? Colors.white : Colors.white38,
+                                    letterSpacing: 0.3,
                                   ),
                                 ),
                               ],
                             ),
                           ),
                         ),
-                        const SizedBox(height: 6),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.black.withValues(
-                                    alpha: 0.6,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 7,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16),
-                                  ),
-                                ),
-                                onPressed: () async {
-                                  await stopTrackingImmediately();
-                                  await _showExitRideModal();
-                                },
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 26,
-                                      height: 26,
-                                      decoration: BoxDecoration(
-                                        color: Colors.red.withValues(
-                                          alpha: 0.15,
-                                        ),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                        Icons.stop,
-                                        color: Colors.red,
-                                        size: 15,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 3),
-                                    const Text(
-                                      'Arrêter',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.black.withValues(
-                                    alpha: 0.6,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 7,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16),
-                                  ),
-                                ),
-                                onPressed: _showAddWaypointModal,
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 26,
-                                      height: 26,
-                                      decoration: BoxDecoration(
-                                        color: Colors.blue.withValues(
-                                          alpha: 0.15,
-                                        ),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                        Icons.place,
-                                        color: Colors.blue,
-                                        size: 15,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 3),
-                                    const Text(
-                                      'Waypoint',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.red,
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 7,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16),
-                                  ),
-                                ),
-                                onPressed: () {},
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 26,
-                                      height: 26,
-                                      decoration: BoxDecoration(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.2,
-                                        ),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                        Icons.emergency,
-                                        color: Colors.white,
-                                        size: 15,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 3),
-                                    const Text(
-                                      'SOS',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ] else ...[
+                    // Ride en cours : cockpit plein écran
+                    _buildCockpitMapButtons(
+                      topOffset: MediaQuery.of(context).padding.top + 92,
+                    ),
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: _buildCockpitBanner(
+                        topInset: MediaQuery.of(context).padding.top,
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      child: _buildCockpitControls(),
+                    ),
+                  ],
                 ],
               ),
             ),
+          ),
         ],
       ),
     );
