@@ -134,6 +134,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   String appVersion = '';
+  String? _buildDate;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
   Box? _ridesBox;
@@ -677,10 +678,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final formattedDate = packageInfo.updateTime != null
         ? DateFormat('dd/MM/yyyy HH:mm').format(packageInfo.updateTime!.toLocal())
         : null;
+    final build = packageInfo.buildNumber;
+    final formattedBuild = build.length > 2
+        ? '${build.substring(0, build.length - 2)}.${build.substring(build.length - 2)}'
+        : build;
     setState(() {
-      appVersion =
-          'v${packageInfo.version}+${packageInfo.buildNumber}'
-          '${formattedDate != null ? ' - $formattedDate' : ''}';
+      appVersion = 'v${packageInfo.version} build $formattedBuild';
+      _buildDate = formattedDate;
     });
   }
 
@@ -1274,11 +1278,22 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             const SizedBox(height: 8),
-            Text(
-              appVersion,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.white38,
+            GestureDetector(
+              onTap: _buildDate == null
+                  ? null
+                  : () => ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Compilé le $_buildDate'),
+                          duration: const Duration(seconds: 2),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      ),
+              child: Text(
+                appVersion,
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: Colors.white38,
+                ),
               ),
             ),
           ],
