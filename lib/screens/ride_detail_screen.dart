@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:sunday_tracker/widgets/ride_share_card.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -33,133 +34,72 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   // ── Styles de carte ──────────────────────────────────────────────────────────
   static const String _prefKeyMapStyle = 'detail_map_style_index';
   int _mapStyleIndex = 0;
+
+  // ── Recentrage auto ──────────────────────────────────────────────────────────
+  bool _recentering = true;
+  late List<LatLng> _ridePoints;
   final List<Map<String, dynamic>> _mapStyles = [
     {'label': 'Plan',      'icon': Icons.map,           'url': 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',                                                'subdomains': <String>[],            'maxZoom': 19},
     {'label': 'Satellite', 'icon': Icons.satellite_alt, 'url': 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 'subdomains': <String>[],            'maxZoom': 19},
     {'label': 'Topo',      'icon': Icons.terrain,       'url': 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',                                              'subdomains': <String>['a','b','c'], 'maxZoom': 17},
   ];
 
-  bool _mapFullscreen = false;
+  // ── Sheet glissant ───────────────────────────────────────────────────────────
+  static const double _kReducedSize  = 0.17;
+  static const double _kExpandedSize = 0.90;
+  late DraggableScrollableController _sheetController;
 
-  // ── Blocs collapsibles ───────────────────────────────────────────────────────
-  static const String _prefCollapsed = 'detail_blocks_collapsed';
-  final Set<String> _collapsed = {};
-
-  // Paires 2 colonnes : collapse l'un => collapse l'autre
-  static const Map<String, String> _pairs = {
-    'dist':  'duree',
-    'duree': 'dist',
-    'speed': 'elev',
-    'elev':  'speed',
-  };
-
-  Future<void> _loadCollapsed() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getStringList(_prefCollapsed);
-    setState(() {
-      _collapsed.clear();
-      if (saved != null) {
-        _collapsed.addAll(saved);
-      } else {
-        _collapsed.addAll(['meteo']); // météo réduite par défaut
-      }
-    });
-  }
-
-  Future<void> _saveCollapsed() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_prefCollapsed, _collapsed.toList());
-  }
-
-  void _toggleBlock(String id) {
-    setState(() {
-      final partner = _pairs[id];
-      final willCollapse = !_collapsed.contains(id);
-      if (willCollapse) {
-        _collapsed.add(id);
-        if (partner != null) _collapsed.add(partner);
-      } else {
-        _collapsed.remove(id);
-        if (partner != null) _collapsed.remove(partner);
-      }
-    });
-    _saveCollapsed();
-  }
-
-  bool _isCollapsed(String id) => _collapsed.contains(id);
-
-  // ── Wrapper bloc collapsible ─────────────────────────────────────────────────
-  Widget _collapsibleBlock({
-    required String id,
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String summary,
-    required Widget body,
-  }) {
-    final collapsed = _isCollapsed(id);
-    return GestureDetector(
-      onTap: () => _toggleBlock(id),
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(12, 10, 12, collapsed ? 10 : 4),
-            child: Row(children: [
-              Icon(icon, color: iconColor, size: 12),
-              const SizedBox(width: 5),
-              Expanded(
-                child: collapsed
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(title, style: const TextStyle(fontSize: 10, color: Color(0xFF8A8A8A))),
-                        const SizedBox(height: 3),
-                        Text(summary,
-                          style: TextStyle(fontSize: 14, color: iconColor, fontWeight: FontWeight.w600),
-                          overflow: TextOverflow.ellipsis),
-                      ],
-                    )
-                  : Text(title, style: const TextStyle(fontSize: 10, color: Color(0xFF8A8A8A))),
-              ),              AnimatedRotation(
-                turns: collapsed ? -0.25 : 0,
-                duration: const Duration(milliseconds: 200),
-                child: const Icon(Icons.keyboard_arrow_down, color: Color(0xFF444444), size: 16),
-              ),
-            ]),
-          ),
-          AnimatedCrossFade(
-            firstChild:  Padding(padding: const EdgeInsets.fromLTRB(12, 0, 12, 12), child: body),
-            secondChild: const SizedBox.shrink(),
-            crossFadeState: collapsed ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-            duration: const Duration(milliseconds: 200),
-          ),
-        ]),
-      ),
-    );
-  }
-
+  // ════════════════════════════════════════════════════════════════════════════
+  // LIFECYCLE
+  // ════════════════════════════════════════════════════════════════════════════
   @override
   void initState() {
     super.initState();
     rideName = widget.ride['name'] ?? _defaultName();
     rideNote = widget.ride['note'] ?? '';
     _loadMapStyle();
-    _loadCollapsed();
+    _ridePoints = (widget.ride['points'] as List)
+        .map((p) => LatLng((p['lat'] as num).toDouble(), (p['lng'] as num).toDouble()))
+        .toList();
+    _sheetController = DraggableScrollableController();
+    _sheetController.addListener(_onPanelChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final pointsData = widget.ride['points'] as List;
-      final ridePoints = pointsData.map((p) => LatLng(p['lat'], p['lng'])).toList();
-      if (ridePoints.isEmpty) return;
+      if (_ridePoints.isEmpty) return;
       await Future.delayed(const Duration(milliseconds: 300));
-      final bounds = LatLngBounds.fromPoints(ridePoints);
-      mapController.fitCamera(
-        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(60)),
-      );
+      if (!mounted) return;
+      _fitToRoute(panelFraction: _kReducedSize);
     });
+  }
+
+  @override
+  void dispose() {
+    _sheetController.dispose();
+    super.dispose();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // HELPERS
+  // ════════════════════════════════════════════════════════════════════════════
+
+  void _onPanelChanged() {
+    if (_recentering && _sheetController.isAttached) {
+      _fitToRoute(panelFraction: _sheetController.size);
+    }
+  }
+
+  void _fitToRoute({double? panelFraction}) {
+    if (!mounted || _ridePoints.isEmpty) return;
+    final screenH = MediaQuery.of(context).size.height;
+    final safeTop = MediaQuery.of(context).padding.top;
+    final fraction = panelFraction ??
+        (_sheetController.isAttached ? _sheetController.size : _kReducedSize);
+    mapController.fitCamera(
+      CameraFit.bounds(
+        bounds: LatLngBounds.fromPoints(_ridePoints),
+        padding: EdgeInsets.fromLTRB(30, safeTop + 80, 30, screenH * fraction + 20),
+      ),
+    );
   }
 
   String _defaultName() {
@@ -167,7 +107,25 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     if (startTime == null) return 'Sortie';
     final dt = DateTime.tryParse(startTime);
     if (dt == null) return 'Sortie';
-    return '${dt.day.toString().padLeft(2,'0')}/${dt.month.toString().padLeft(2,'0')}/${dt.year} ${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+    return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _formatDateSub() {
+    final startTime = widget.ride['startTime'];
+    if (startTime == null) return '';
+    final dt = DateTime.tryParse(startTime)?.toLocal();
+    if (dt == null) return '';
+    const days   = ['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'];
+    const months = ['jan.','fév.','mars','avr.','mai','juin','juil.','août','sep.','oct.','nov.','déc.'];
+    final date = '${days[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    final startH = '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+    final endTime = widget.ride['endTime'];
+    final dtEnd = endTime != null ? DateTime.tryParse(endTime)?.toLocal() : null;
+    final endH = dtEnd != null
+        ? '${dtEnd.hour.toString().padLeft(2,'0')}:${dtEnd.minute.toString().padLeft(2,'0')}'
+        : null;
+    return endH != null ? '$date | $startH - $endH' : '$date | $startH';
   }
 
   Future<void> _loadMapStyle() async {
@@ -186,7 +144,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     if (isoString == null) return '--:--';
     final dt = DateTime.tryParse(isoString)?.toLocal();
     if (dt == null) return '--:--';
-    return '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
   String _formatDistance(dynamic meters) {
@@ -207,23 +165,81 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     final d = (meters ?? 0).toDouble();
     final s = (seconds ?? 0).toDouble();
     if (s <= 0) return '--';
-    final kmh = (d / 1000) / (s / 3600);
-    return '${kmh.toStringAsFixed(1)} km/h';
+    return '${((d / 1000) / (s / 3600)).toStringAsFixed(1)} km/h';
   }
 
-  String _formatMaxSpeed(dynamic kmh) {
-    if (kmh == null) return '--';
-    return '${(kmh as num).toStringAsFixed(1)} km/h';
+  List<double> _buildSpeedProfile() {
+    final pts = widget.ride['points'] as List;
+    if (pts.length < 2) return [];
+
+    // Si les points ont un champ speed (m/s), on l'utilise directement
+    if (pts.first['speed'] != null) {
+      return pts.map((p) {
+        final s = (p['speed'] as num?)?.toDouble();
+        if (s == null) return null;
+        final kmh = s * 3.6;
+        return (kmh >= 0 && kmh < 200) ? kmh : null;
+      }).whereType<double>().toList();
+    }
+
+    // Construire la liste de timestamps par point
+    List<DateTime?> times;
+    final firstTimeRaw = pts.first['time'] ?? pts.first['timestamp'];
+    if (firstTimeRaw != null) {
+      // Les points ont un champ time ou timestamp
+      times = pts.map((p) {
+        final t = (p['time'] ?? p['timestamp']) as String?;
+        return t != null ? DateTime.tryParse(t) : null;
+      }).toList();
+    } else {
+      // Pas de timestamp par point : on interpole depuis startTime + durationSeconds
+      final startStr = widget.ride['startTime'] as String?;
+      final totalSec = (widget.ride['durationSeconds'] as num?)?.toDouble() ?? 0;
+      if (startStr == null || totalSec <= 0) return [];
+      final start = DateTime.tryParse(startStr);
+      if (start == null) return [];
+      final intervalMs = (totalSec * 1000) / (pts.length - 1);
+      times = List.generate(pts.length,
+        (i) => start.add(Duration(milliseconds: (i * intervalMs).round())));
+    }
+
+    // Calculer la vitesse entre points consécutifs (haversine)
+    final speeds = <double>[];
+    for (int i = 1; i < pts.length; i++) {
+      final t1 = times[i - 1];
+      final t2 = times[i];
+      if (t1 == null || t2 == null) continue;
+      final dtS = t2.difference(t1).inSeconds.toDouble();
+      if (dtS <= 0) continue;
+      final lat1 = (pts[i - 1]['lat'] as num).toDouble();
+      final lon1 = (pts[i - 1]['lng'] as num).toDouble();
+      final lat2 = (pts[i]['lat'] as num).toDouble();
+      final lon2 = (pts[i]['lng'] as num).toDouble();
+      final dLat = (lat2 - lat1) * 111000;
+      final dLon = (lon2 - lon1) * 111000 * cos(lat1 * pi / 180);
+      final dM   = sqrt(dLat * dLat + dLon * dLon);
+      final kmh  = (dM / dtS) * 3.6;
+      if (kmh >= 0 && kmh < 200) speeds.add(kmh);
+    }
+    return speeds;
+  }
+
+  String _fmtCompactTime(int seconds) {
+    final d = Duration(seconds: seconds);
+    if (d.inHours > 0) {
+      return '${d.inHours}h${(d.inMinutes % 60).toString().padLeft(2, '0')}';
+    }
+    return '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
   }
 
   String _formatWaypointTime(dynamic isoString) {
     if (isoString == null) return '--';
     final dt = DateTime.tryParse(isoString);
     if (dt == null) return '--';
-    return '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
-  // ── Gradient tracé (orange → violet) ────────────────────────────────────────
+  // ── Gradient tracé ───────────────────────────────────────────────────────────
   List<Color> _buildGradientColors(int count) {
     const colors = [Color(0xFFFF8A00), Color(0xFFD946EF), Color(0xFF6D28D9)];
     if (count <= 1) return [colors.first];
@@ -234,57 +250,173 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     });
   }
 
-  // ── Profil altimétrique — liste de doubles depuis Hive ──────────────────────
+  // ── Profil altimétrique ──────────────────────────────────────────────────────
   List<double> _buildAltitudeProfile() {
     final pointsData = widget.ride['points'] as List;
-    final alts = pointsData
+    return pointsData
         .map((p) => (p['alt'] as num?)?.toDouble())
         .whereType<double>()
         .toList();
-    return alts;
   }
 
-  // ── Modal édition ────────────────────────────────────────────────────────────
-  Future<void> _showEditModal() async {
+  // ════════════════════════════════════════════════════════════════════════════
+  // MODALS
+  // ════════════════════════════════════════════════════════════════════════════
+  Future<void> _showEditModal({bool focusNote = false}) async {
     final nameController = TextEditingController(text: rideName);
     final noteController = TextEditingController(text: rideNote);
+    final nameFocus = FocusNode();
+    final noteFocus = FocusNode();
 
     await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (modalContext) => Padding(
-        padding: EdgeInsets.only(left: 24, right: 24, top: 24, bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Modifier la sortie', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-          const SizedBox(height: 24),
-          const Text('Nom', style: TextStyle(fontSize: 14, color: Colors.white54)),
-          const SizedBox(height: 8),
-          TextField(
-            controller: nameController, style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(filled: true, fillColor: const Color(0xFF2A2A2A),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-              hintText: 'Nom de la sortie', hintStyle: const TextStyle(color: Colors.white38)),
+      builder: (modalContext) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (focusNote) {
+            noteFocus.requestFocus();
+          } else {
+            nameFocus.requestFocus();
+          }
+        });
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 24, right: 24, top: 24,
+            bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24,
           ),
-          const SizedBox(height: 20),
-          const Text('Note', style: TextStyle(fontSize: 14, color: Colors.white54)),
-          const SizedBox(height: 8),
-          TextField(
-            controller: noteController, style: const TextStyle(color: Colors.white), maxLines: 4,
-            decoration: InputDecoration(filled: true, fillColor: const Color(0xFF2A2A2A),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-              hintText: 'Ajouter une note...', hintStyle: const TextStyle(color: Colors.white38)),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Modifier la sortie',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 24),
+            const Text('Nom', style: TextStyle(fontSize: 14, color: Colors.white54)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: nameController,
+              focusNode: nameFocus,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                filled: true, fillColor: const Color(0xFF2A2A2A),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                hintText: 'Nom de la sortie', hintStyle: const TextStyle(color: Colors.white38),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text('Note', style: TextStyle(fontSize: 14, color: Colors.white54)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: noteController,
+              focusNode: noteFocus,
+              style: const TextStyle(color: Colors.white),
+              maxLines: 4,
+              decoration: InputDecoration(
+                filled: true, fillColor: const Color(0xFF2A2A2A),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                hintText: 'Ajouter une note…', hintStyle: const TextStyle(color: Colors.white38),
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.teal, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
+                ),
+                onPressed: () async {
+                  Navigator.of(modalContext).pop();
+                  await _saveEdits(nameController.text.trim(), noteController.text.trim());
+                },
+                child: const Text('Sauvegarder', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+
+  Future<void> _showNoteEditor() async {
+    final controller = TextEditingController(text: rideNote);
+    final focusNode  = FocusNode();
+
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1E22),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => focusNode.requestFocus());
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20, right: 20, top: 16,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
           ),
-          const SizedBox(height: 24),
-          SizedBox(width: double.infinity, child: ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32))),
-            onPressed: () async { Navigator.of(modalContext).pop(); await _saveEdits(nameController.text.trim(), noteController.text.trim()); },
-            child: const Text('Sauvegarder', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          )),
-        ]),
-      ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 36, height: 4,
+              decoration: BoxDecoration(color: Colors.white24,
+                borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 18),
+            Row(children: [
+              const Icon(Icons.notes, color: Color(0xFF60a5fa), size: 18),
+              const SizedBox(width: 8),
+              const Text('Note',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+            ]),
+            const SizedBox(height: 14),
+            TextField(
+              controller: controller,
+              focusNode: focusNode,
+              style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.5),
+              maxLines: 6,
+              minLines: 3,
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: const Color(0xFF242830),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none),
+                hintText: 'Écris ta note ici…',
+                hintStyle: const TextStyle(color: Colors.white30),
+                contentPadding: const EdgeInsets.all(14),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(children: [
+              Expanded(
+                child: TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    foregroundColor: Colors.white54),
+                  child: const Text('Annuler', style: TextStyle(fontSize: 15)),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await _saveEdits(rideName, controller.text.trim());
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2563eb),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    elevation: 0,
+                  ),
+                  child: const Text('Enregistrer',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ]),
+          ]),
+        );
+      },
     );
   }
 
@@ -294,7 +426,10 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     updatedRide['name'] = newName.isEmpty ? _defaultName() : newName;
     updatedRide['note'] = newNote;
     await box.put(widget.rideKey, updatedRide);
-    setState(() { rideName = updatedRide['name']; rideNote = updatedRide['note']; });
+    setState(() {
+      rideName = updatedRide['name'];
+      rideNote = updatedRide['note'];
+    });
     _syncRideToSupabase(updatedRide);
   }
 
@@ -309,7 +444,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
 
   void _syncRideToSupabase(Map ride) async {
     final startedAt = ride['startTime'] as String?;
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId    = Supabase.instance.client.auth.currentUser?.id;
     if (startedAt == null || userId == null) return;
     try {
       await Supabase.instance.client.from('rides').upsert(
@@ -353,39 +488,48 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                 const Text('Aucune note', style: TextStyle(fontSize: 15, color: Colors.white38, fontStyle: FontStyle.italic)),
               if (photos.isNotEmpty) ...[
                 const SizedBox(height: 16),
-                SizedBox(height: 120, child: ListView.builder(
-                  scrollDirection: Axis.horizontal, itemCount: photos.length,
-                  itemBuilder: (context, index) {
-                    final path = photos[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: Stack(children: [
-                        GestureDetector(
-                          onTap: () => showDialog(context: context, builder: (_) => Dialog(
-                            backgroundColor: Colors.black,
-                            child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
-                          )),
-                          child: ClipRRect(borderRadius: BorderRadius.circular(12),
-                            child: Image.file(File(path), width: 120, height: 120, fit: BoxFit.cover)),
-                        ),
-                        Positioned(
-                          top: 4, right: 4,
-                          child: GestureDetector(
-                            onTap: () async {
-                              await _deletePhotoFromWaypoint(wp, path);
-                              setSheetState(() {});
-                            },
-                            child: Container(
-                              width: 22, height: 22,
-                              decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
-                              child: const Icon(Icons.close, size: 14, color: Colors.white),
+                SizedBox(
+                  height: 120,
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: photos.length,
+                    itemBuilder: (context, index) {
+                      final path = photos[index];
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Stack(children: [
+                          GestureDetector(
+                            onTap: () => showDialog(
+                              context: context,
+                              builder: (_) => Dialog(
+                                backgroundColor: Colors.black,
+                                child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.file(File(path), width: 120, height: 120, fit: BoxFit.cover),
                             ),
                           ),
-                        ),
-                      ]),
-                    );
-                  },
-                )),
+                          Positioned(
+                            top: 4, right: 4,
+                            child: GestureDetector(
+                              onTap: () async {
+                                await _deletePhotoFromWaypoint(wp, path);
+                                setSheetState(() {});
+                              },
+                              child: Container(
+                                width: 22, height: 22,
+                                decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                                child: const Icon(Icons.close, size: 14, color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        ]),
+                      );
+                    },
+                  ),
+                ),
               ],
               const SizedBox(height: 16),
               Text('Lat: ${wp['lat'].toStringAsFixed(6)}  Long: ${wp['lng'].toStringAsFixed(6)}',
@@ -398,500 +542,24 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════════════
-  // WIDGETS BLOCS
-  // ══════════════════════════════════════════════════════════════════════════════
-
-  // ── Carte stat générique ─────────────────────────────────────────────────────
-  Widget _statCard({
-    required IconData icon,
-    required Color color,
-    required String label,
-    required String value,
-    String? sub,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(icon, color: color, size: 12),
-          const SizedBox(width: 5),
-          Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF666666))),
-        ]),
-        const SizedBox(height: 5),
-        Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: color)),
-        if (sub != null) ...[
-          const SizedBox(height: 2),
-          Text(sub, style: const TextStyle(fontSize: 10, color: Color(0xFF555555))),
-        ],
-      ]),
-    );
-  }
-
-  // ── Profil altimétrique ──────────────────────────────────────────────────────
-  Widget _buildElevationProfile(List<double> alts) {
-    if (alts.length < 2) return const SizedBox.shrink();
-    return Container(
-      height: 96,
-      color: const Color(0xFF111111),
-      child: CustomPaint(
-        painter: _AltitudeProfilePainter(alts),
-        size: Size.infinite,
-      ),
-    );
-  }
-
-  // ── Card dénivelé ────────────────────────────────────────────────────────────
-  // ── Helpers pour blocs collapsibles ────────────────────────────────────────
-
-  String _weatherSummary() {
-    final w = (widget.ride['weatherStart'] ?? widget.ride['weatherEnd']) as Map?;
-    if (w == null) return '';
-    final temp = (w['temp'] as num?)?.toStringAsFixed(0) ?? '--';
-    final desc = (w['desc'] as String?) ?? '';
-    return '$temp° $desc';
-  }
-
-  Widget _buildElevationBody() {
-    final dPlus  = (widget.ride['totalElevationMeters'] as num?)?.toDouble() ?? 0;
-    final dMinus = (widget.ride['totalElevationDown']   as num?)?.toDouble() ?? 0;
-    final altMax = (widget.ride['altitudeMax']          as num?)?.toDouble();
-    final altMin = (widget.ride['altitudeMin']          as num?)?.toDouble();
-    final maxRef = max(dPlus, 1.0);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _elevRow('D+', '+${dPlus.toStringAsFixed(0)} m', dPlus / maxRef, const Color(0xFFfb923c)),
-      const SizedBox(height: 6),
-      _elevRow('D−', '−${dMinus.toStringAsFixed(0)} m', dMinus / maxRef, const Color(0xFFa78bfa)),
-      if (altMax != null) ...[
-        const SizedBox(height: 6),
-        _elevRow('Max', '${altMax.toStringAsFixed(0)} m',
-          (altMax - (altMin ?? 0)) / max((altMax - (altMin ?? 0)), 1),
-          const Color(0xFF4ade80)),
-      ],
-    ]);
-  }
-
-  Widget _buildMovingTimeBody() {
-    final totalSec  = (widget.ride['durationSeconds']   as num?)?.toInt() ?? 0;
-    final movingSec = (widget.ride['movingTimeSeconds'] as num?)?.toInt() ?? totalSec;
-    final stopSec   = (totalSec - movingSec).clamp(0, totalSec);
-    final pct       = totalSec > 0 ? (movingSec / totalSec * 100).round() : 100;
-    String fmtSec(int s) {
-      final d = Duration(seconds: s);
-      return '${d.inHours.toString().padLeft(2,"0")}:${(d.inMinutes % 60).toString().padLeft(2,"0")}';
-    }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Text(fmtSec(movingSec), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-        const Spacer(),
-        Text('$pct%', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-      ]),
-      const SizedBox(height: 6),
-      ClipRRect(borderRadius: BorderRadius.circular(3), child: Row(children: [
-        Expanded(flex: movingSec, child: Container(height: 4, color: const Color(0xFF4ade80))),
-        if (stopSec > 0) Expanded(flex: stopSec, child: Container(height: 4, color: const Color(0xFF252525))),
-      ])),
-      const SizedBox(height: 4),
-      Text('Arrêts : ${fmtSec(stopSec)}', style: const TextStyle(fontSize: 10, color: Color(0xFF444444))),
-    ]);
-  }
-
-  Widget _buildWeatherBody() {
-    final wStart = widget.ride['weatherStart'] as Map?;
-    final wEnd   = widget.ride['weatherEnd']   as Map?;
-    if (wStart == null && wEnd == null) return const SizedBox.shrink();
-    return IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      if (wStart != null) Expanded(child: _weatherCol(wStart, 'Départ', _formatTimeOnly(widget.ride['startTime']), const Color(0xFFFF8A00))),
-      if (wStart != null && wEnd != null)
-        Container(width: 1, color: const Color(0xFF222222), margin: const EdgeInsets.symmetric(horizontal: 10)),
-      if (wEnd   != null) Expanded(child: _weatherCol(wEnd, 'Arrivée', _formatTimeOnly(widget.ride['endTime']), const Color(0xFF6D28D9))),
-    ]));
-  }
-
-  Widget _buildElevationCard() {
-    final dPlus     = (widget.ride['totalElevationMeters']  as num?)?.toDouble() ?? 0;
-    final dMinus    = (widget.ride['totalElevationDown']    as num?)?.toDouble() ?? 0;
-    final altStart  = (widget.ride['altitudeStart']         as num?)?.toDouble();
-    final altEnd    = (widget.ride['altitudeEnd']           as num?)?.toDouble();
-    final altMax    = (widget.ride['altitudeMax']           as num?)?.toDouble();
-    final altMin    = (widget.ride['altitudeMin']           as num?)?.toDouble();
-
-    final maxRef = max(dPlus, 1.0);
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [
-          Icon(Icons.trending_up, color: Color(0xFFfb923c), size: 12),
-          SizedBox(width: 5),
-          Text('Dénivelé', style: TextStyle(fontSize: 10, color: Color(0xFF666666))),
-        ]),
-        const SizedBox(height: 12),
-        _elevRow('D+',       '+${dPlus.toStringAsFixed(0)} m',    dPlus  / maxRef,           const Color(0xFFfb923c)),
-        const SizedBox(height: 7),
-        _elevRow('D−',       '−${dMinus.toStringAsFixed(0)} m',   dMinus / maxRef,           const Color(0xFFa78bfa)),
-        if (altMax != null) ...[
-          const SizedBox(height: 7),
-          _elevRow('Alt. max', '${altMax.toStringAsFixed(0)} m',  (altMax - (altMin ?? 0)) / max((altMax - (altMin ?? 0)), 1), const Color(0xFF4ade80)),
-        ],
-        if (altMin != null) ...[
-          const SizedBox(height: 7),
-          _elevRow('Alt. min', '${altMin.toStringAsFixed(0)} m',  0.2,                       const Color(0xFF555555)),
-        ],
-        if (altStart != null || altEnd != null) ...[
-          const Padding(padding: EdgeInsets.symmetric(vertical: 10), child: Divider(color: Color(0xFF222222), height: 1)),
-          Row(children: [
-            if (altStart != null) Expanded(child: _altMini('Départ', '${altStart.toStringAsFixed(0)} m', const Color(0xFFFF8A00))),
-            if (altStart != null && altEnd != null) const SizedBox(width: 8),
-            if (altEnd   != null) Expanded(child: _altMini('Arrivée','${altEnd.toStringAsFixed(0)} m',   const Color(0xFF6D28D9))),
-          ]),
-        ],
-      ]),
-    );
-  }
-
-  Widget _elevRow(String label, String value, double progress, Color color) => Row(children: [
-    SizedBox(width: 52, child: Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF555555)))),
-    Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(2),
-      child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0),
-        backgroundColor: const Color(0xFF252525), color: color, minHeight: 3))),
-    const SizedBox(width: 8),
-    SizedBox(width: 52, child: Text(value,
-      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color), textAlign: TextAlign.right)),
-  ]);
-
-  Widget _altMini(String label, String value, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-    decoration: BoxDecoration(color: const Color(0xFF111111), borderRadius: BorderRadius.circular(9)),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: const TextStyle(fontSize: 9, color: Color(0xFF555555))),
-      const SizedBox(height: 2),
-      Text(value, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
-    ]),
-  );
-
-  // ── Temps en mouvement ───────────────────────────────────────────────────────
-  Widget _buildMovingTimeCard() {
-    final totalSec  = (widget.ride['durationSeconds']      as num?)?.toInt() ?? 0;
-    final movingSec = (widget.ride['movingTimeSeconds']    as num?)?.toInt() ?? totalSec;
-    final stopSec   = (totalSec - movingSec).clamp(0, totalSec);
-    final ratio     = totalSec > 0 ? movingSec / totalSec : 1.0;
-    final pct       = (ratio * 100).round();
-
-    String fmtSec(int s) {
-      final d = Duration(seconds: s);
-      final h = d.inHours.toString().padLeft(2,'0');
-      final m = (d.inMinutes % 60).toString().padLeft(2,'0');
-      final sc = (d.inSeconds % 60).toString().padLeft(2,'0');
-      return '$h:$m:$sc';
-    }
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [
-          Icon(Icons.directions_run, color: Color(0xFF4ade80), size: 12),
-          SizedBox(width: 5),
-          Text('Temps en mouvement', style: TextStyle(fontSize: 10, color: Color(0xFF666666))),
-        ]),
-        const SizedBox(height: 10),
-        Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
-          Text(fmtSec(movingSec), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-          const SizedBox(width: 8),
-          Text('sur ${fmtSec(totalSec)} total', style: const TextStyle(fontSize: 11, color: Color(0xFF555555))),
-          const Spacer(),
-          Text('$pct%', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-        ]),
-        const SizedBox(height: 8),
-        ClipRRect(borderRadius: BorderRadius.circular(3), child: Row(children: [
-          Expanded(flex: movingSec, child: Container(height: 5, color: const Color(0xFF4ade80))),
-          if (stopSec > 0) Expanded(flex: stopSec, child: Container(height: 5, color: const Color(0xFF252525))),
-        ])),
-        const SizedBox(height: 5),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          const Text('En mouvement', style: TextStyle(fontSize: 10, color: Color(0xFF4ade80))),
-          Text('Arrêts : ${fmtSec(stopSec)}', style: const TextStyle(fontSize: 10, color: Color(0xFF444444))),
-        ]),
-      ]),
-    );
-  }
-
-  // ── Météo départ / arrivée ───────────────────────────────────────────────────
-  Widget _buildWeatherCard() {
-    final wStart = widget.ride['weatherStart'] as Map?;
-    final wEnd   = widget.ride['weatherEnd']   as Map?;
-    if (wStart == null && wEnd == null) return const SizedBox.shrink();
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [
-          Icon(Icons.wb_sunny_outlined, color: Color(0xFFfbbf24), size: 12),
-          SizedBox(width: 5),
-          Text('Météo', style: TextStyle(fontSize: 10, color: Color(0xFF666666))),
-        ]),
-        const SizedBox(height: 12),
-        IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          if (wStart != null) Expanded(child: _weatherCol(wStart, 'Au départ', _formatTimeOnly(widget.ride['startTime']), const Color(0xFFFF8A00))),
-          if (wStart != null && wEnd != null)
-            Container(width: 1, color: const Color(0xFF222222), margin: const EdgeInsets.symmetric(horizontal: 12)),
-          if (wEnd   != null) Expanded(child: _weatherCol(wEnd, 'À l\'arrivée', _formatTimeOnly(widget.ride['endTime']), const Color(0xFF6D28D9))),
-        ])),
-      ]),
-    );
-  }
-
-  Widget _weatherCol(Map w, String title, String time, Color accentColor) {
-    final temp     = (w['temp']     as num?)?.toStringAsFixed(0) ?? '--';
-    final wind     = (w['wind']     as num?)?.toStringAsFixed(0) ?? '--';
-    final windDir  = (w['windDir']  as String?) ?? '';
-    final humidity = (w['humidity'] as num?)?.toInt();
-    final desc     = (w['desc']     as String?) ?? '';
-
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Icon(Icons.circle, color: accentColor, size: 7),
-        const SizedBox(width: 5),
-        Text('$title · $time', style: TextStyle(fontSize: 10, color: accentColor)),
-      ]),
-      const SizedBox(height: 8),
-      Text('$temp°', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600, color: accentColor)),
-      const SizedBox(height: 4),
-      if (desc.isNotEmpty)
-        Text(desc, style: const TextStyle(fontSize: 11, color: Color(0xFF888888))),
-      const SizedBox(height: 4),
-      _weatherRow(Icons.air,     '$wind km/h $windDir'),
-      if (humidity != null)
-        _weatherRow(Icons.water_drop_outlined, '$humidity% humidité'),
-    ]);
-  }
-
-  Widget _weatherRow(IconData icon, String text) => Padding(
-    padding: const EdgeInsets.only(top: 3),
-    child: Row(children: [
-      Icon(icon, size: 11, color: const Color(0xFF555555)),
-      const SizedBox(width: 5),
-      Flexible(child: Text(text, style: const TextStyle(fontSize: 10, color: Color(0xFF666666)))),
-    ]),
-  );
-
-  // ── Points de passage (départ + WP + arrivée unifiés) ───────────────────────
-  // ── Wrapper collapsible pour Points de passage ─────────────────────────────
-  Widget _collapsiblePassage(List<Map> waypoints) {
-    final count = waypoints.length + 2; // +2 pour départ et arrivée
-    return _collapsibleBlock(
-      id: 'passage',
-      icon: Icons.route,
-      iconColor: const Color(0xFF60a5fa),
-      title: 'Points de passage',
-      summary: '$count points',
-      body: _buildPassageBody(waypoints),
-    );
-  }
-
-  // Corps seul des points de passage (sans container externe)
-  Widget _buildPassageBody(List<Map> waypoints) {
-    final startTime  = _formatTimeOnly(widget.ride['startTime']);
-    final endTime    = _formatTimeOnly(widget.ride['endTime']);
-    final pointsData = widget.ride['points'] as List;
-    final altStart   = (widget.ride['altitudeStart'] as num?)?.toStringAsFixed(0);
-    final altEnd     = (widget.ride['altitudeEnd']   as num?)?.toStringAsFixed(0);
-
-    String? startCoords, endCoords;
-    if (pointsData.isNotEmpty) {
-      final first = pointsData.first;
-      final last  = pointsData.last;
-      startCoords = '${(first['lat'] as num).toStringAsFixed(4)}° · ${(first['lng'] as num).toStringAsFixed(4)}°';
-      endCoords   = '${(last['lat']  as num).toStringAsFixed(4)}° · ${(last['lng']  as num).toStringAsFixed(4)}°';
-    }
-
-    final items = <_PassageItem>[
-      _PassageItem(type: _PassageType.start, time: startTime, coords: startCoords, altitude: altStart != null ? '$altStart m' : null),
-      ...waypoints.map((wp) => _PassageItem(
-        type: _PassageType.waypoint,
-        time: _formatWaypointTime(wp['timestamp']),
-        note: (wp['note'] as String?)?.trim(),
-        photos: (wp['photos'] as List?)?.cast<String>() ?? [],
-        wp: wp,
-      )),
-      _PassageItem(type: _PassageType.end, time: endTime, coords: endCoords, altitude: altEnd != null ? '$altEnd m' : null),
-    ];
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: items.asMap().entries.map((e) {
-        return _buildPassageItem(e.value, e.key == items.length - 1);
-      }).toList(),
-    );
-  }
-
-  Widget _buildPassagePoints(List<Map> waypoints) {
-    final startTime  = _formatTimeOnly(widget.ride['startTime']);
-    final endTime    = _formatTimeOnly(widget.ride['endTime']);
-    final pointsData = widget.ride['points'] as List;
-    final altStart   = (widget.ride['altitudeStart'] as num?)?.toStringAsFixed(0);
-    final altEnd     = (widget.ride['altitudeEnd']   as num?)?.toStringAsFixed(0);
-
-    // Coordonnées
-    String? startCoords, endCoords;
-    if (pointsData.isNotEmpty) {
-      final first = pointsData.first;
-      final last  = pointsData.last;
-      startCoords = '${(first['lat'] as num).toStringAsFixed(4)}° · ${(first['lng'] as num).toStringAsFixed(4)}°';
-      endCoords   = '${(last['lat']  as num).toStringAsFixed(4)}° · ${(last['lng']  as num).toStringAsFixed(4)}°';
-    }
-
-    // Liste complète : départ, WP intermédiaires, arrivée
-    final items = <_PassageItem>[
-      _PassageItem(type: _PassageType.start, time: startTime, coords: startCoords, altitude: altStart != null ? '$altStart m' : null),
-      ...waypoints.map((wp) => _PassageItem(
-        type: _PassageType.waypoint,
-        time: _formatWaypointTime(wp['timestamp']),
-        note: (wp['note'] as String?)?.trim(),
-        photos: (wp['photos'] as List?)?.cast<String>() ?? [],
-        wp: wp,
-      )),
-      _PassageItem(type: _PassageType.end, time: endTime, coords: endCoords, altitude: altEnd != null ? '$altEnd m' : null),
-    ];
-
-    final totalCount = items.length;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
-      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          const Icon(Icons.route, color: Color(0xFF60a5fa), size: 12),
-          const SizedBox(width: 5),
-          const Text('Points de passage', style: TextStyle(fontSize: 10, color: Color(0xFF666666))),
-          const SizedBox(width: 6),
-          Text('· $totalCount', style: const TextStyle(fontSize: 10, color: Color(0xFF444444))),
-        ]),
-        const SizedBox(height: 12),
-        ...items.asMap().entries.map((e) {
-          final idx   = e.key;
-          final item  = e.value;
-          final isLast = idx == items.length - 1;
-          return _buildPassageItem(item, isLast);
-        }),
-      ]),
-    );
-  }
-
-  Widget _buildPassageItem(_PassageItem item, bool isLast) {
-    Color dotColor;
-    Widget dotChild;
-    String title;
-
-    switch (item.type) {
-      case _PassageType.start:
-        dotColor = const Color(0xFFFF8A00);
-        dotChild = const Icon(Icons.play_arrow_rounded, size: 12, color: Color(0xFFFF8A00));
-        title = 'Départ';
-        break;
-      case _PassageType.end:
-        dotColor = const Color(0xFF6D28D9);
-        dotChild = const Icon(Icons.sports_score_sharp, size: 12, color: Color(0xFF6D28D9));
-        title = 'Arrivée';
-        break;
-      case _PassageType.waypoint:
-        dotColor = const Color(0xFF60a5fa);
-        dotChild = const Icon(Icons.place, size: 12, color: Color(0xFF60a5fa));
-        title = 'Point mémorisé';
-        break;
-    }
-
-    return GestureDetector(
-      onTap: item.type == _PassageType.waypoint && item.wp != null
-          ? () => _showWaypointPopup(context, item.wp!)
-          : null,
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Colonne gauche : dot + ligne verticale
-        SizedBox(width: 28, child: Column(children: [
-          Container(
-            width: 26, height: 26,
-            decoration: BoxDecoration(
-              color: dotColor.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-              border: Border.all(color: dotColor, width: 1.5),
-            ),
-            child: Center(child: dotChild),
-          ),
-          if (!isLast)
-            Container(width: 1.5, height: 32, color: const Color(0xFF252525)),
-        ])),
-        const SizedBox(width: 10),
-        // Colonne droite : contenu
-        Expanded(child: Padding(
-          padding: EdgeInsets.only(bottom: isLast ? 8 : 0, top: 3),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
-              Text(item.time, style: const TextStyle(fontSize: 11, color: Color(0xFF555555))),
-            ]),
-            if (item.coords != null)
-              Padding(padding: const EdgeInsets.only(top: 2),
-                child: Text(item.coords!, style: const TextStyle(fontSize: 10, color: Color(0xFF555555)))),
-            if (item.altitude != null)
-              Padding(padding: const EdgeInsets.only(top: 1),
-                child: Text('Altitude : ${item.altitude}', style: const TextStyle(fontSize: 10, color: Color(0xFF555555)))),
-            if (item.note != null && item.note!.isNotEmpty)
-              Padding(padding: const EdgeInsets.only(top: 3),
-                child: Text(item.note!, style: const TextStyle(fontSize: 12, color: Color(0xFF888888)), maxLines: 2, overflow: TextOverflow.ellipsis)),
-            if (item.photos != null && item.photos!.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              SizedBox(height: 50, child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: item.photos!.length,
-                itemBuilder: (ctx, i) {
-                  final path = item.photos![i];
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: Stack(children: [
-                      GestureDetector(
-                        onTap: () => showDialog(context: context, builder: (_) => Dialog(
-                          backgroundColor: Colors.black,
-                          child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
-                        )),
-                        child: ClipRRect(borderRadius: BorderRadius.circular(7),
-                          child: Image.file(File(path), width: 50, height: 50, fit: BoxFit.cover)),
-                      ),
-                      Positioned(
-                        top: 2, right: 2,
-                        child: GestureDetector(
-                          onTap: () => _deletePhotoFromWaypoint(item.wp!, path),
-                          child: Container(
-                            width: 16, height: 16,
-                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
-                            child: const Icon(Icons.close, size: 10, color: Colors.white),
-                          ),
-                        ),
-                      ),
-                    ]),
-                  );
-                },
-              )),
-            ],
-            if (!isLast) const SizedBox(height: 6),
-          ]),
-        )),
-      ]),
-    );
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
   // CARTE
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
   Widget _buildFlutterMap(List<LatLng> ridePoints, List<Map> waypointsData, List<Color> gradientColors) {
     return FlutterMap(
       mapController: mapController,
       options: MapOptions(
         initialCenter: ridePoints.isNotEmpty ? ridePoints.first : const LatLng(48.8566, 2.3522),
         initialZoom: 13,
+        onTap: (tapPos, latLng) {
+          if (_sheetController.isAttached && _sheetController.size > _kReducedSize + 0.02) {
+            _sheetController.animateTo(
+              _kReducedSize,
+              duration: const Duration(milliseconds: 320),
+              curve: Curves.easeOut,
+            );
+          }
+        },
       ),
       children: [
         TileLayer(
@@ -929,74 +597,769 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
             ),
             Marker(
               point: ridePoints.last, width: 26, height: 26,
-              child: Container(decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.25), shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF6D28D9), width: 2),
-                boxShadow: [BoxShadow(color: const Color(0xFF6D28D9).withValues(alpha: 0.85), blurRadius: 8)],
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.25), shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF6D28D9), width: 2),
+                  boxShadow: [BoxShadow(color: const Color(0xFF6D28D9).withValues(alpha: 0.85), blurRadius: 8)],
+                ),
+                child: const Icon(Icons.sports_score_sharp, color: Colors.white, size: 22),
               ),
-              child: const Icon(Icons.sports_score_sharp, color: Colors.white, size: 22)),
             ),
           ]),
       ],
     );
   }
 
-  Widget _buildStyleSelector() {
-    return Container(
-      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.65), borderRadius: BorderRadius.circular(20)),
-      padding: const EdgeInsets.all(3),
-      child: Row(mainAxisSize: MainAxisSize.min, children: List.generate(_mapStyles.length, (i) {
-        final style = _mapStyles[i];
-        final isActive = i == _mapStyleIndex;
-        return GestureDetector(
-          onTap: () { setState(() => _mapStyleIndex = i); _saveMapStyle(i); },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            margin: const EdgeInsets.symmetric(horizontal: 2),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(color: isActive ? Colors.white : Colors.transparent, borderRadius: BorderRadius.circular(16)),
-            child: Row(children: [
-              Icon(style['icon'] as IconData, size: 13, color: isActive ? Colors.black : Colors.white70),
-              if (isActive) ...[
-                const SizedBox(width: 4),
-                Text(style['label'] as String, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.black)),
-              ],
-            ]),
+  // ════════════════════════════════════════════════════════════════════════════
+  // TOP BAR FLOTTANTE
+  // ════════════════════════════════════════════════════════════════════════════
+  Widget _buildTopBar() {
+    const double barH = 54;
+    return SizedBox(
+      height: barH,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _floatingBtn(
+            onTap: () => Navigator.pop(context),
+            child: const Icon(Icons.arrow_back, size: 20, color: Colors.white),
           ),
-        );
-      })),
-    );
-  }
-
-  Widget _buildFullscreenButton({required bool fullscreen}) {
-    return GestureDetector(
-      onTap: () => setState(() => _mapFullscreen = !_mapFullscreen),
-      child: Container(
-        width: 36, height: 36,
-        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.65), borderRadius: BorderRadius.circular(10)),
-        child: Icon(fullscreen ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.white, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: GestureDetector(
+              onTap: _showEditModal,
+              behavior: HitTestBehavior.opaque,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.52),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(rideName,
+                          style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white,
+                            letterSpacing: -0.4,
+                          ),
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                        const SizedBox(height: 2),
+                        Text(_formatDateSub(),
+                          style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.65)),
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          _floatingBtn(
+            onTap: _showShareSheet,
+            width: 52,
+            child: const Icon(Icons.ios_share, size: 22, color: Colors.white),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildFitBoundsButton(List<LatLng> ridePoints) {
+  Widget _floatingBtn({required VoidCallback onTap, required Widget child, double width = 44}) {
     return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(15),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            width: width,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.52),
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+            ),
+            child: Center(child: child),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // CONTRÔLES CARTE — bouton primaire + groupe sombre (style mockup)
+  // ════════════════════════════════════════════════════════════════════════════
+  Widget _buildMapControls(List<LatLng> ridePoints) {
+    // Tout dans un seul container — boutons collés, taille compacte
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          width: 46,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.70),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.09)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Recentrer — fond bleu dans le groupe
+              GestureDetector(
+                onTap: () {
+                  setState(() => _recentering = !_recentering);
+                  if (_recentering) _fitToRoute();
+                },
+                child: SizedBox(
+                  width: 46, height: 46,
+                  child: Center(
+                    child: Icon(
+                      Icons.my_location,
+                      color: _recentering ? const Color(0xFF2da8ff) : Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                ),
+              ),
+              // Séparateur
+              Container(height: 1, color: Colors.white.withValues(alpha: 0.09)),
+              // Calques — cycle entre les styles de fond
+              GestureDetector(
+                onTap: () {
+                  final next = (_mapStyleIndex + 1) % _mapStyles.length;
+                  setState(() => _mapStyleIndex = next);
+                  _saveMapStyle(next);
+                },
+                child: SizedBox(
+                  width: 46, height: 46,
+                  child: Center(
+                    child: Icon(
+                      _mapStyles[_mapStyleIndex]['icon'] as IconData,
+                      color: Colors.white, size: 22,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // PANNEAU GLISSANT
+  // ════════════════════════════════════════════════════════════════════════════
+  Widget _buildSheetContent(
+    ScrollController scrollController,
+    List<double> altProfile,
+    List<Map> waypointsData,
+    bool hasWeather,
+    List<LatLng> ridePoints,
+  ) {
+    const decoration = BoxDecoration(
+      color: Color(0xF2111416),
+      borderRadius: BorderRadius.only(
+        topLeft: Radius.circular(28),
+        topRight: Radius.circular(28),
+      ),
+    );
+
+    final handleAndStrip = GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () {
-        if (ridePoints.isEmpty) return;
-        final bounds = LatLngBounds.fromPoints(ridePoints);
-        mapController.fitCamera(
-          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(60)),
+        if (!_sheetController.isAttached) return;
+        final target = _sheetController.size <= _kReducedSize + 0.02
+            ? _kExpandedSize
+            : _kReducedSize;
+        _sheetController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOut,
         );
       },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Poignée
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Center(
+              child: Container(
+                width: 44, height: 5,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.38),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+            ),
+          ),
+          // Mini bande stats
+          _buildMiniStrip(),
+        ],
+      ),
+    );
+
+    final listView = ListView(
+      controller: scrollController,
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 40),
+      physics: const ClampingScrollPhysics(),
+      children: [
+        _buildElevChartCard(altProfile),
+        const SizedBox(height: 10),
+        _buildSpeedCard(),
+        const SizedBox(height: 10),
+        if (hasWeather) ...[
+          _buildWeatherCard(),
+          const SizedBox(height: 10),
+        ],
+        Container(height: 1, color: Colors.white.withValues(alpha: 0.07)),
+        const SizedBox(height: 14),
+        _buildPassagePoints(waypointsData),
+        const SizedBox(height: 10),
+        _buildNoteCard(),
+        const SizedBox(height: 14),
+        _buildDeleteBtn(),
+      ],
+    );
+
+    return AnimatedBuilder(
+      animation: _sheetController,
+      builder: (context, child) {
+        final isReduced = !_sheetController.isAttached ||
+            _sheetController.size < _kReducedSize + 0.04;
+        return Container(
+          decoration: decoration,
+          child: Column(
+            children: [
+              handleAndStrip,
+              // Toujours présent pour que le drag du sheet fonctionne,
+              // masqué visuellement en mode réduit.
+              Expanded(
+                child: Opacity(
+                  opacity: isReduced ? 0.0 : 1.0,
+                  child: IgnorePointer(ignoring: isReduced, child: child!),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+      child: listView,
+    );
+  }
+
+  // ── Mini bande stats ─────────────────────────────────────────────────────────
+  Widget _buildMiniStrip() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
       child: Container(
-        width: 36, height: 36,
-        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.65), borderRadius: BorderRadius.circular(10)),
-        child: const Icon(Icons.fit_screen, color: Colors.white, size: 20),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        child: Row(children: [
+          _miniStat(Icons.route_outlined, const Color(0xFFfb923c),
+            _formatDistance(widget.ride['distanceMeters']), 'Distance'),
+          Container(width: 1, height: 48, color: Colors.white.withValues(alpha: 0.10)),
+          _miniStat(Icons.timer_outlined, const Color(0xFF4ade80),
+            _formatDuration(widget.ride['durationSeconds']), 'Durée'),
+        ]),
       ),
     );
   }
 
-  // ── Share sheet ──────────────────────────────────────────────────────────────
+  Widget _miniStat(IconData icon, Color color, String value, String label) {
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 22, color: color),
+            const SizedBox(height: 3),
+            Text(label,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF888888)),
+              textAlign: TextAlign.center),
+            const SizedBox(height: 4),
+            Text(value,
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: color,
+                  letterSpacing: -0.5),
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Carte dénivelé avec graphe ───────────────────────────────────────────────
+  Widget _buildElevChartCard(List<double> altProfile) {
+    final dPlus    = (widget.ride['totalElevationMeters'] as num?)?.toDouble() ?? 0;
+    final dMinus   = (widget.ride['totalElevationDown']   as num?)?.toDouble() ?? 0;
+    final altStart = (widget.ride['altitudeStart']        as num?)?.toDouble();
+    final altEnd   = (widget.ride['altitudeEnd']          as num?)?.toDouble();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF171B1F),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.trending_up, size: 15, color: Color(0xFFfb923c)),
+          const SizedBox(width: 7),
+          const Text('Dénivelé',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+        ]),
+        const SizedBox(height: 14),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: SizedBox(
+                height: 180,
+                child: altProfile.length >= 2
+                  ? ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: _buildElevationProfile(altProfile, altStart: altStart, altEnd: altEnd),
+                    )
+                  : Center(
+                      child: Text('Pas de données altitude',
+                        style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.30))),
+                    ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _elevStatItem('+${dPlus.toStringAsFixed(0)} m',  'D+', const Color(0xFFfb923c)),
+                const SizedBox(height: 20),
+                _elevStatItem('−${dMinus.toStringAsFixed(0)} m', 'D−', const Color(0xFFa78bfa)),
+              ],
+            ),
+          ],
+        ),
+      ]),
+    );
+  }
+
+  Widget _elevStatItem(String value, String label, Color color) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: color, letterSpacing: -0.5)),
+      const SizedBox(height: 2),
+      Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF666666))),
+    ]);
+  }
+
+  // ── Profil altimétrique (CustomPaint) ────────────────────────────────────────
+  Widget _buildElevationProfile(List<double> alts, {double? altStart, double? altEnd}) {
+    if (alts.length < 2) return const SizedBox.shrink();
+    return ColoredBox(
+      color: const Color(0xFF111111),
+      child: CustomPaint(
+        painter: _AltitudeProfilePainter(alts, altStart: altStart, altEnd: altEnd),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+
+  // ── Section Vitesse ──────────────────────────────────────────────────────────
+  Widget _buildSpeedCard() {
+    final totalSec  = (widget.ride['durationSeconds']   as num?)?.toInt() ?? 0;
+    final movingSec = (widget.ride['movingTimeSeconds'] as num?)?.toInt() ?? totalSec;
+    final stopSec   = (totalSec - movingSec).clamp(0, totalSec);
+    final avgSpeed  = _formatAvgSpeed(widget.ride['distanceMeters'], widget.ride['durationSeconds']);
+
+    final speedPts  = _buildSpeedProfile();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF171B1F),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Titre
+        Row(children: [
+          const Icon(Icons.speed_outlined, size: 15, color: Color(0xFF60a5fa)),
+          const SizedBox(width: 7),
+          const Text('Vitesse',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+        ]),
+        const SizedBox(height: 14),
+        // KPI + graphe
+        Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('VITESSE MOYENNE',
+              style: TextStyle(fontSize: 10, color: Color(0xFF666666), letterSpacing: 0.5)),
+            const SizedBox(height: 6),
+            Text(avgSpeed,
+              style: const TextStyle(
+                fontSize: 30, fontWeight: FontWeight.w800,
+                color: Color(0xFF60a5fa), letterSpacing: -1)),
+          ]),
+          const SizedBox(width: 14),
+          if (speedPts.length >= 2)
+            Expanded(
+              child: SizedBox(
+                height: 110,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: CustomPaint(
+                    painter: _SpeedProfilePainter(speedPts),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+            ),
+        ]),
+        const SizedBox(height: 16),
+        // Barre temps
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: Row(children: [
+            Expanded(
+              flex: movingSec.clamp(1, totalSec),
+              child: Container(height: 6, color: const Color(0xFF60a5fa))),
+            if (stopSec > 0)
+              Expanded(
+                flex: stopSec,
+                child: Container(height: 6, color: const Color(0xFF252525))),
+          ]),
+        ),
+        const SizedBox(height: 8),
+        // Légende
+        Row(children: [
+          Text(_fmtCompactTime(movingSec),
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF60a5fa))),
+          const SizedBox(width: 5),
+          const Text('en mouvement',
+            style: TextStyle(fontSize: 12, color: Color(0xFF8899aa))),
+          const SizedBox(width: 10),
+          Container(width: 1, height: 14, color: const Color(0xFF444444)),
+          const SizedBox(width: 10),
+          Text(_fmtCompactTime(stopSec),
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFFaabbcc))),
+          const SizedBox(width: 5),
+          const Text('arrêté',
+            style: TextStyle(fontSize: 12, color: Color(0xFF8899aa))),
+        ]),
+      ]),
+    );
+  }
+
+
+  // ── Météo ────────────────────────────────────────────────────────────────────
+  Widget _buildWeatherCard() {
+    final wStart = widget.ride['weatherStart'] as Map?;
+    final wEnd   = widget.ride['weatherEnd']   as Map?;
+    if (wStart == null && wEnd == null) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF171B1F),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.wb_sunny_outlined, color: Color(0xFFfbbf24), size: 13),
+          const SizedBox(width: 6),
+          const Text('Météo', style: TextStyle(fontSize: 13, color: Color(0xFF888888))),
+        ]),
+        const SizedBox(height: 12),
+        IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (wStart != null)
+            Expanded(child: _weatherCol(wStart, 'Au départ',   _formatTimeOnly(widget.ride['startTime']), const Color(0xFFFF8A00))),
+          if (wStart != null && wEnd != null)
+            Container(width: 1, color: const Color(0xFF222222), margin: const EdgeInsets.symmetric(horizontal: 12)),
+          if (wEnd != null)
+            Expanded(child: _weatherCol(wEnd, "À l'arrivée", _formatTimeOnly(widget.ride['endTime']), const Color(0xFF6D28D9))),
+        ])),
+      ]),
+    );
+  }
+
+  Widget _weatherCol(Map w, String title, String time, Color accentColor) {
+    final temp     = (w['temp']     as num?)?.toStringAsFixed(0) ?? '--';
+    final wind     = (w['wind']     as num?)?.toStringAsFixed(0) ?? '--';
+    final windDir  = (w['windDir']  as String?) ?? '';
+    final humidity = (w['humidity'] as num?)?.toInt();
+    final desc     = (w['desc']     as String?) ?? '';
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Icon(Icons.circle, color: accentColor, size: 7),
+        const SizedBox(width: 5),
+        Text('$title · $time', style: TextStyle(fontSize: 10, color: accentColor)),
+      ]),
+      const SizedBox(height: 8),
+      Text('$temp°', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600, color: accentColor)),
+      const SizedBox(height: 4),
+      if (desc.isNotEmpty) Text(desc, style: const TextStyle(fontSize: 11, color: Color(0xFF888888))),
+      const SizedBox(height: 4),
+      _weatherRow(Icons.air,              '$wind km/h $windDir'),
+      if (humidity != null)
+        _weatherRow(Icons.water_drop_outlined, '$humidity% humidité'),
+    ]);
+  }
+
+  Widget _weatherRow(IconData icon, String text) => Padding(
+    padding: const EdgeInsets.only(top: 3),
+    child: Row(children: [
+      Icon(icon, size: 11, color: const Color(0xFF555555)),
+      const SizedBox(width: 5),
+      Flexible(child: Text(text, style: const TextStyle(fontSize: 10, color: Color(0xFF666666)))),
+    ]),
+  );
+
+  // ── Points de passage ────────────────────────────────────────────────────────
+  Widget _buildPassagePoints(List<Map> waypoints) {
+    final startTime  = _formatTimeOnly(widget.ride['startTime']);
+    final endTime    = _formatTimeOnly(widget.ride['endTime']);
+    final pointsData = widget.ride['points'] as List;
+    final altStart   = (widget.ride['altitudeStart'] as num?)?.toStringAsFixed(0);
+    final altEnd     = (widget.ride['altitudeEnd']   as num?)?.toStringAsFixed(0);
+
+    String? startCoords, endCoords;
+    if (pointsData.isNotEmpty) {
+      final first = pointsData.first;
+      final last  = pointsData.last;
+      startCoords = '${(first['lat'] as num).toStringAsFixed(4)}° · ${(first['lng'] as num).toStringAsFixed(4)}°';
+      endCoords   = '${(last['lat']  as num).toStringAsFixed(4)}° · ${(last['lng']  as num).toStringAsFixed(4)}°';
+    }
+
+    final items = <_PassageItem>[
+      _PassageItem(type: _PassageType.start, time: startTime, coords: startCoords, altitude: altStart != null ? '$altStart m' : null),
+      ...waypoints.map((wp) => _PassageItem(
+        type: _PassageType.waypoint,
+        time: _formatWaypointTime(wp['timestamp']),
+        note: (wp['note'] as String?)?.trim(),
+        photos: (wp['photos'] as List?)?.cast<String>() ?? [],
+        wp: wp,
+      )),
+      _PassageItem(type: _PassageType.end, time: endTime, coords: endCoords, altitude: altEnd != null ? '$altEnd m' : null),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF171B1F),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.route, color: Color(0xFF60a5fa), size: 13),
+          const SizedBox(width: 6),
+          const Text('Points de passage', style: TextStyle(fontSize: 13, color: Color(0xFF888888))),
+          const SizedBox(width: 6),
+          Text('· ${items.length}', style: const TextStyle(fontSize: 11, color: Color(0xFF444444))),
+        ]),
+        const SizedBox(height: 12),
+        ...items.asMap().entries.map((e) => _buildPassageItem(e.value, e.key == items.length - 1)),
+      ]),
+    );
+  }
+
+  Widget _buildPassageItem(_PassageItem item, bool isLast) {
+    Color dotColor;
+    Widget dotChild;
+    String title;
+
+    switch (item.type) {
+      case _PassageType.start:
+        dotColor = const Color(0xFFFF8A00);
+        dotChild = const Icon(Icons.play_arrow_rounded, size: 12, color: Color(0xFFFF8A00));
+        title    = 'Départ';
+        break;
+      case _PassageType.end:
+        dotColor = const Color(0xFF6D28D9);
+        dotChild = const Icon(Icons.sports_score_sharp, size: 12, color: Color(0xFF6D28D9));
+        title    = 'Arrivée';
+        break;
+      case _PassageType.waypoint:
+        dotColor = const Color(0xFF60a5fa);
+        dotChild = const Icon(Icons.place, size: 12, color: Color(0xFF60a5fa));
+        title    = 'Point mémorisé';
+        break;
+    }
+
+    return GestureDetector(
+      onTap: item.type == _PassageType.waypoint && item.wp != null
+          ? () => _showWaypointPopup(context, item.wp!)
+          : null,
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(width: 28, child: Column(children: [
+          Container(
+            width: 26, height: 26,
+            decoration: BoxDecoration(
+              color: dotColor.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+              border: Border.all(color: dotColor, width: 1.5),
+            ),
+            child: Center(child: dotChild),
+          ),
+          if (!isLast) Container(width: 1.5, height: 32, color: const Color(0xFF252525)),
+        ])),
+        const SizedBox(width: 10),
+        Expanded(child: Padding(
+          padding: EdgeInsets.only(bottom: isLast ? 8 : 0, top: 3),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+              Text(item.time, style: const TextStyle(fontSize: 11, color: Color(0xFF555555))),
+            ]),
+            if (item.coords != null)
+              Padding(padding: const EdgeInsets.only(top: 2),
+                child: Text(item.coords!, style: const TextStyle(fontSize: 10, color: Color(0xFF555555)))),
+            if (item.altitude != null)
+              Padding(padding: const EdgeInsets.only(top: 1),
+                child: Text('Altitude : ${item.altitude}', style: const TextStyle(fontSize: 10, color: Color(0xFF555555)))),
+            if (item.note != null && item.note!.isNotEmpty)
+              Padding(padding: const EdgeInsets.only(top: 3),
+                child: Text(item.note!, style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                  maxLines: 2, overflow: TextOverflow.ellipsis)),
+            if (item.photos != null && item.photos!.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              SizedBox(height: 50, child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: item.photos!.length,
+                itemBuilder: (ctx, i) {
+                  final path = item.photos![i];
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Stack(children: [
+                      GestureDetector(
+                        onTap: () => showDialog(context: context, builder: (_) => Dialog(
+                          backgroundColor: Colors.black,
+                          child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
+                        )),
+                        child: ClipRRect(borderRadius: BorderRadius.circular(7),
+                          child: Image.file(File(path), width: 50, height: 50, fit: BoxFit.cover)),
+                      ),
+                      Positioned(top: 2, right: 2,
+                        child: GestureDetector(
+                          onTap: () => _deletePhotoFromWaypoint(item.wp!, path),
+                          child: Container(
+                            width: 16, height: 16,
+                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                            child: const Icon(Icons.close, size: 10, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  );
+                },
+              )),
+            ],
+            if (!isLast) const SizedBox(height: 6),
+          ]),
+        )),
+      ]),
+    );
+  }
+
+  // ── Note ─────────────────────────────────────────────────────────────────────
+  Widget _buildNoteCard() {
+    final hasNote = rideNote.isNotEmpty;
+    return GestureDetector(
+      onTap: _showNoteEditor,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF171B1F),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: hasNote
+                ? Colors.white.withValues(alpha: 0.07)
+                : const Color(0xFF2563eb).withValues(alpha: 0.22)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(
+            hasNote ? Icons.notes : Icons.add_circle_outline_rounded,
+            color: hasNote ? Colors.white38 : const Color(0xFF60a5fa),
+            size: 18,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: hasNote
+                ? Text(rideNote,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.45),
+                    maxLines: 3, overflow: TextOverflow.ellipsis)
+                : const Text('Ajouter une note à cette sortie…',
+                    style: TextStyle(
+                      color: Color(0xFF4d6080), fontSize: 14,
+                      fontStyle: FontStyle.italic)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Bouton supprimer ─────────────────────────────────────────────────────────
+  Widget _buildDeleteBtn() {
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Colors.redAccent,
+          side: const BorderSide(color: Color(0xFF3A1A1A), width: 1),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
+        ),
+        onPressed: () async {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF1B1B1B),
+              title: const Text('Supprimer'),
+              content: const Text('Cette action supprimera définitivement la sortie ainsi que les données de sécurité associées.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Annuler'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Supprimer'),
+                ),
+              ],
+            ),
+          );
+          if (confirmed == true && mounted) {
+            await deleteRide(context, widget.ride, widget.rideKey, popAfterDelete: true);
+          }
+        },
+        icon: const Icon(Icons.delete_outline, size: 18),
+        label: const Text('Supprimer la sortie'),
+      ),
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // PARTAGE
+  // ════════════════════════════════════════════════════════════════════════════
   Future<void> _showShareSheet() async {
     await showModalBottomSheet(
       context: context,
@@ -1005,28 +1368,46 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       builder: (ctx) => Padding(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: Container(width: 36, height: 4, margin: const EdgeInsets.only(bottom: 20),
-            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)))),
+          Center(child: Container(
+            width: 36, height: 4, margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+          )),
           const Text('Partager', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
           const SizedBox(height: 20),
-          _shareOption(icon: Icons.route, iconColor: Colors.orange, title: 'Exporter la trace GPX',
-            subtitle: 'Fichier compatible GPS, Komoot, Strava…', available: true,
-            onTap: () { Navigator.pop(ctx); exportAndShareGpx(); }),
+          _shareOption(
+            icon: Icons.route, iconColor: Colors.orange,
+            title: 'Exporter la trace GPX',
+            subtitle: 'Fichier compatible GPS, Komoot, Strava…',
+            available: true,
+            onTap: () { Navigator.pop(ctx); exportAndShareGpx(); },
+          ),
           const SizedBox(height: 10),
-          _shareOption(icon: Icons.image_outlined, iconColor: Colors.purple, title: 'Partager un résumé',
-            subtitle: 'Image ou lien avec stats et carte', available: false, onTap: null),
+          _shareOption(
+            icon: Icons.image_outlined, iconColor: Colors.purple,
+            title: 'Partager un résumé',
+            subtitle: 'Image avec stats et trace GPS',
+            available: true,
+            onTap: () { Navigator.pop(ctx); _shareRideImage(); },
+          ),
           const SizedBox(height: 10),
-          _shareOption(icon: Icons.link, iconColor: Colors.blue, title: 'Copier le lien de suivi',
-            subtitle: 'Lien vers la position en temps réel', available: false, onTap: null),
+          _shareOption(
+            icon: Icons.link, iconColor: Colors.blue,
+            title: 'Copier le lien de suivi',
+            subtitle: 'Lien vers la position en temps réel',
+            available: false, onTap: null,
+          ),
         ]),
       ),
     );
   }
 
   Widget _shareOption({
-    required IconData icon, required Color iconColor,
-    required String title, required String subtitle,
-    required bool available, required VoidCallback? onTap,
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required bool available,
+    required VoidCallback? onTap,
   }) {
     return GestureDetector(
       onTap: available ? onTap : null,
@@ -1034,21 +1415,31 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         opacity: available ? 1.0 : 0.4,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(color: const Color(0xFF2A2A2A), borderRadius: BorderRadius.circular(14),
-            border: available ? null : Border.all(color: Colors.white12, width: 0.5)),
+          decoration: BoxDecoration(
+            color: const Color(0xFF2A2A2A),
+            borderRadius: BorderRadius.circular(14),
+            border: available ? null : Border.all(color: Colors.white12, width: 0.5),
+          ),
           child: Row(children: [
-            Container(width: 40, height: 40,
-              decoration: BoxDecoration(color: iconColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(10)),
-              child: Icon(icon, color: iconColor, size: 20)),
+            Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(
+                color: iconColor.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: iconColor, size: 20),
+            ),
             const SizedBox(width: 14),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
                 if (!available) ...[
                   const SizedBox(width: 8),
-                  Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(4)),
-                    child: const Text('bientôt', style: TextStyle(fontSize: 9, color: Colors.white38))),
+                    child: const Text('bientôt', style: TextStyle(fontSize: 9, color: Colors.white38)),
+                  ),
                 ],
               ]),
               const SizedBox(height: 2),
@@ -1061,7 +1452,18 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     );
   }
 
-  // ── Export GPX (avec altitude si disponible) ─────────────────────────────────
+  void _shareRideImage() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RideSharePreviewScreen(
+          ride: Map<String, dynamic>.from(widget.ride),
+          rideName: rideName,
+        ),
+      ),
+    );
+  }
+
   Future<void> exportAndShareGpx() async {
     final pointsData = widget.ride['points'] as List;
     if (pointsData.isEmpty) return;
@@ -1086,216 +1488,102 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     await Share.shareXFiles([XFile(file.path)], text: 'Trace GPX exportée depuis Sunday Tracker');
   }
 
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
   // BUILD
-  // ══════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
-    final pointsData     = widget.ride['points'] as List;
-    final ridePoints     = pointsData.map((p) => LatLng(p['lat'], p['lng'])).toList();
-    final waypointsData  = (widget.ride['waypoints'] as List?)?.cast<Map>() ?? [];
-    final gradientColors = _buildGradientColors(ridePoints.length);
-    final altProfile     = _buildAltitudeProfile();
-    final hasWeather     = widget.ride['weatherStart'] != null || widget.ride['weatherEnd'] != null;
-    final hasMovingTime  = widget.ride['movingTimeSeconds'] != null;
-
-    return Stack(children: [
-      Scaffold(
-        backgroundColor: const Color(0xFF0D0D0D),
-
-        appBar: PreferredSize(
-          preferredSize: const Size.fromHeight(kToolbarHeight),
-          child: SafeArea(child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: Container(width: 40, height: 40,
-                  decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(12)),
-                  child: const Icon(Icons.arrow_back, size: 20, color: Colors.white)),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: GestureDetector(
-                onTap: _showEditModal,
-                behavior: HitTestBehavior.opaque,
-                child: Text(rideName, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: Colors.white, height: 1.3),
-                  maxLines: 2, overflow: TextOverflow.ellipsis),
-              )),
-              const SizedBox(width: 8),
-              GestureDetector(onTap: _showEditModal,
-                child: Container(width: 40, height: 40,
-                  decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(12)),
-                  child: const Icon(Icons.edit_outlined, size: 20, color: Colors.white))),
-              const SizedBox(width: 8),
-              GestureDetector(onTap: _showShareSheet,
-                child: Container(width: 40, height: 40,
-                  decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(12)),
-                  child: const Icon(Icons.share, size: 20, color: Colors.white))),
-            ]),
-          )),
-        ),
-
-        body: Stack(children: [
-          SingleChildScrollView(
-            child: Column(children: [
-
-              // ── CARTE (arrondie) + profil altimétrique ─────────────────────
-              if (!_mapFullscreen) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                  child: SizedBox(height: 220, child: Stack(clipBehavior: Clip.hardEdge, children: [
-                    ClipRRect(borderRadius: BorderRadius.circular(24),
-                      child: _buildFlutterMap(ridePoints, waypointsData, gradientColors)),
-                    Positioned(bottom: 10, left: 10, child: _buildStyleSelector()),
-                    Positioned(top: 10, right: 10, child: _buildFitBoundsButton(ridePoints)),
-                    Positioned(bottom: 10, right: 10, child: _buildFullscreenButton(fullscreen: false)),
-                  ])),
-                ),
-                // Profil altimétrique collé sous la carte, même padding latéral
-                if (altProfile.length >= 2)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                    child: ClipRRect(
-                      borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(16), bottomRight: Radius.circular(16)),
-                      child: _buildElevationProfile(altProfile),
-                    ),
-                  )
-                else
-                  const SizedBox(height: 12),
-              ],
-
-              // ── Distance / Durée ───────────────────────────────────────────
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Expanded(child: _collapsibleBlock(
-                    id: 'dist', icon: Icons.route_outlined, iconColor: const Color(0xFFfb923c),
-                    title: 'Distance', summary: _formatDistance(widget.ride['distanceMeters']),
-                    body: Text(_formatDistance(widget.ride['distanceMeters']),
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: Color(0xFFfb923c))),
-                  )),
-                  const SizedBox(width: 8),
-                  // Durée + temps en mouvement intégré
-                  Expanded(child: _collapsibleBlock(
-                    id: 'duree', icon: Icons.timer_outlined, iconColor: const Color(0xFF4ade80),
-                    title: 'Durée', summary: _formatDuration(widget.ride['durationSeconds']),
-                    body: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(_formatDuration(widget.ride['durationSeconds']),
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-                      if (hasMovingTime) ...[
-                        const SizedBox(height: 5),
-                        Container(height: 1, color: const Color(0xFF222222)),
-                        const SizedBox(height: 5),
-                        Row(children: [
-                          const Icon(Icons.directions_run, size: 10, color: Color(0xFF555555)),
-                          const SizedBox(width: 4),
-                          const Text('En mouvement', style: TextStyle(fontSize: 10, color: Color(0xFF555555))),
-                          const Spacer(),
-                          Text(_formatDuration(widget.ride['movingTimeSeconds']),
-                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF4ade80))),
-                        ]),
-                      ],
-                    ]),
-                  )),
-                ])),
-
-              // ── Vitesse / Dénivelé ─────────────────────────────────────────
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Expanded(child: _collapsibleBlock(
-                    id: 'speed', icon: Icons.show_chart, iconColor: const Color(0xFF60a5fa),
-                    title: 'Vitesse moy.',
-                    summary: _formatAvgSpeed(widget.ride['distanceMeters'], widget.ride['durationSeconds']),
-                    body: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(_formatAvgSpeed(widget.ride['distanceMeters'], widget.ride['durationSeconds']),
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: Color(0xFF60a5fa))),
-                      const SizedBox(height: 2),
-                      Text('max ${_formatMaxSpeed(widget.ride["maxSpeedKmh"])}',
-                        style: const TextStyle(fontSize: 10, color: Color(0xFF555555))),
-                    ]),
-                  )),
-                  const SizedBox(width: 8),
-                  Expanded(child: _collapsibleBlock(
-                    id: 'elev', icon: Icons.trending_up, iconColor: const Color(0xFFfb923c),
-                    title: 'Dénivelé',
-                    summary: '+${((widget.ride["totalElevationMeters"] as num?) ?? 0).toStringAsFixed(0)} m',
-                    body: _buildElevationBody(),
-                  )),
-                ])),
-
-              // ── Météo pleine largeur ────────────────────────────────────────
-              if (hasWeather)
-                Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: _collapsibleBlock(
-                    id: 'meteo', icon: Icons.wb_sunny_outlined, iconColor: const Color(0xFFfbbf24),
-                    title: 'Météo',
-                    summary: _weatherSummary(),
-                    body: _buildWeatherBody(),
-                  )),
-
-              // ── POINTS DE PASSAGE collapsible ─────────────────────────────
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: _collapsiblePassage(waypointsData)),
-
-              // ── NOTE SORTIE ────────────────────────────────────────────────
-              if (rideNote.isNotEmpty)
-                Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: GestureDetector(
-                    onTap: _showEditModal,
-                    child: Container(width: double.infinity, padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1B1B1B), borderRadius: BorderRadius.circular(14)),
-                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        const Icon(Icons.notes, color: Colors.white54, size: 18),
-                        const SizedBox(width: 10),
-                        Expanded(child: Text(rideNote, style: const TextStyle(color: Colors.white70, fontSize: 14))),
-                      ])),
-                  )),
-
-              // ── SUPPRIMER ──────────────────────────────────────────────────
-              Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
-                child: SizedBox(width: double.infinity, child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent,
-                    side: const BorderSide(color: Color(0xFF3A1A1A), width: 1),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32))),
-                  onPressed: () async {
-                    final confirmed = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        backgroundColor: const Color(0xFF1B1B1B),
-                        title: const Text('Supprimer'),
-                        content: const Text('Cette action supprimera définitivement la sortie ainsi que les données de sécurité associées.'),
-                        actions: [
-                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
-                          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                            onPressed: () => Navigator.pop(context, true), child: const Text('Supprimer')),
-                        ],
-                      ),
-                    );
-                    if (confirmed == true) await deleteRide(context, widget.ride, widget.rideKey, popAfterDelete: true);
-                  },
-                  icon: const Icon(Icons.delete_outline, size: 18),
-                  label: const Text('Supprimer la sortie'),
-                ))),
-            ]),
+    final safeTop       = MediaQuery.of(context).padding.top;
+    final pointsData    = widget.ride['points'] as List;
+    final ridePoints    = pointsData.map((p) => LatLng(p['lat'], p['lng'])).toList();
+    final waypointsData = (widget.ride['waypoints'] as List?)?.cast<Map>() ?? [];
+    final gradColors    = _buildGradientColors(ridePoints.length);
+    final altProfile    = _buildAltitudeProfile();
+    final hasWeather    = widget.ride['weatherStart'] != null || widget.ride['weatherEnd'] != null;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // 1. Carte plein écran
+          Positioned.fill(
+            child: _buildFlutterMap(ridePoints, waypointsData, gradColors),
           ),
-        ]),
-      ),
 
-      // ── FULLSCREEN overlay ───────────────────────────────────────────────────
-      if (_mapFullscreen)
-        Positioned.fill(child: Stack(clipBehavior: Clip.hardEdge, children: [
-          _buildFlutterMap(ridePoints, waypointsData, gradientColors),
-          Positioned(bottom: 24, left: 16, child: _buildStyleSelector()),
-          Positioned(top: 24, right: 16, child: _buildFitBoundsButton(ridePoints)),
-          Positioned(bottom: 24, right: 16, child: _buildFullscreenButton(fullscreen: true)),
-        ])),
-    ]);
+          // 2. Dégradé haut pour lisibilité de la top bar
+          Positioned(
+            top: 0, left: 0, right: 0,
+            child: Container(
+              height: safeTop + 110,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.72),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          // 3. Top bar flottante
+          Positioned(
+            top: safeTop + 12,
+            left: 16, right: 16,
+            child: _buildTopBar(),
+          ),
+
+          // 4. Boutons carte — bas droite, juste au-dessus du panneau
+          AnimatedBuilder(
+            animation: _sheetController,
+            builder: (context, child) {
+              final screenH = MediaQuery.of(context).size.height;
+              final panelSize = _sheetController.isAttached
+                  ? _sheetController.size
+                  : _kReducedSize;
+              final panelH = screenH * panelSize;
+              // Visible en réduit, disparaît quand le panneau monte vers plein écran
+              const fadeStart = _kReducedSize + 0.15;
+              const fadeEnd   = _kReducedSize + 0.30;
+              final opacity = ((fadeEnd - panelSize) / (fadeEnd - fadeStart))
+                  .clamp(0.0, 1.0);
+              return Positioned(
+                right: 10,
+                bottom: panelH + 10,
+                child: IgnorePointer(
+                  ignoring: opacity < 0.05,
+                  child: Opacity(opacity: opacity, child: child!),
+                ),
+              );
+            },
+            child: _buildMapControls(ridePoints),
+          ),
+
+          // 5. Panneau glissant
+          DraggableScrollableSheet(
+            controller: _sheetController,
+            initialChildSize: _kReducedSize,
+            minChildSize: _kReducedSize,
+            maxChildSize: _kExpandedSize,
+            snap: true,
+            builder: (context, scrollController) => _buildSheetContent(
+              scrollController,
+              altProfile,
+              waypointsData,
+              hasWeather,
+              ridePoints,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// MODÈLE INTERNE : point de passage
-// ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+// MODÈLE INTERNE
+// ════════════════════════════════════════════════════════════════════════════
 enum _PassageType { start, waypoint, end }
 
 class _PassageItem {
@@ -1318,12 +1606,156 @@ class _PassageItem {
   });
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+// PAINTER : profil de vitesse
+// ════════════════════════════════════════════════════════════════════════════
+class _SpeedProfilePainter extends CustomPainter {
+  final List<double> speeds;
+
+  const _SpeedProfilePainter(this.speeds);
+
+  // Lissage par moyenne glissante (fenêtre = 5)
+  List<double> _smooth(List<double> data) {
+    const w = 5;
+    final out = <double>[];
+    for (int i = 0; i < data.length; i++) {
+      final lo = (i - w ~/ 2).clamp(0, data.length - 1);
+      final hi = (i + w ~/ 2).clamp(0, data.length - 1);
+      double sum = 0;
+      for (int j = lo; j <= hi; j++) { sum += data[j]; }
+      out.add(sum / (hi - lo + 1));
+    }
+    return out;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (speeds.length < 2) return;
+
+    final smoothed = _smooth(speeds);
+
+    // Le pic local sert TOUJOURS de référence d'échelle → max est toujours en haut
+    final peak = smoothed.reduce(max).clamp(1.0, 300.0);
+
+    // Zone de dessin : topPad réservé au badge + connecteur
+    const topPad = 54.0;
+    const botPad = 4.0;
+    final drawH  = size.height - topPad - botPad;
+
+    double xOf(int i)    => i / (smoothed.length - 1) * size.width;
+    double yOf(double s) => topPad + drawH - (s / peak) * drawH;
+
+    // ── Remplissage gradient ────────────────────────────────────────────────
+    final fillPath = ui.Path()..moveTo(xOf(0), yOf(smoothed[0]));
+    for (int i = 1; i < smoothed.length; i++) {
+      fillPath.lineTo(xOf(i), yOf(smoothed[i]));
+    }
+    fillPath
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+
+    canvas.drawPath(
+      fillPath,
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(0, topPad), Offset(0, size.height),
+          [const Color(0xFF60a5fa).withValues(alpha: 0.18),
+           const Color(0xFF60a5fa).withValues(alpha: 0.01)],
+        )
+        ..style = PaintingStyle.fill,
+    );
+
+    // ── Tracé ligne ─────────────────────────────────────────────────────────
+    final linePath = ui.Path()..moveTo(xOf(0), yOf(smoothed[0]));
+    for (int i = 1; i < smoothed.length; i++) {
+      linePath.lineTo(xOf(i), yOf(smoothed[i]));
+    }
+    canvas.drawPath(linePath, Paint()
+      ..color = const Color(0xFF60a5fa)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round);
+
+    // ── Indice du max (sur données lissées) ─────────────────────────────────
+    int maxIdx = 0;
+    for (int i = 1; i < smoothed.length; i++) {
+      if (smoothed[i] > smoothed[maxIdx]) maxIdx = i;
+    }
+    final px = xOf(maxIdx);
+    final py = yOf(smoothed[maxIdx]); // ≈ topPad puisque peak = smoothed.reduce(max)
+
+    // ── Badge MAX — toujours dans la zone topPad, centré sur px ─────────────
+    final valStr = '${speeds.reduce(max).toStringAsFixed(1)} km/h';
+    final tpLabel = TextPainter(
+      text: const TextSpan(text: 'MAX',
+        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
+          color: Color(0xFFbfdbfe), letterSpacing: 1.0)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final tpVal = TextPainter(
+      text: TextSpan(text: valStr,
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const hP = 10.0; const vP = 6.0; const lineGap = 2.0;
+    final bw = max(tpLabel.width, tpVal.width) + hP * 2;
+    final bh = tpLabel.height + lineGap + tpVal.height + vP * 2;
+
+    // Badge ancré en haut, centré sur px
+    const byFixed = 2.0;
+    final bx = (px - bw / 2).clamp(2.0, size.width - bw - 2);
+
+    // Fond bleu foncé + bordure bleue
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTWH(bx, byFixed, bw, bh), const Radius.circular(8)),
+      Paint()..color = const Color(0xFF1e3a8a),
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTWH(bx, byFixed, bw, bh), const Radius.circular(8)),
+      Paint()
+        ..color = const Color(0xFF60a5fa)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+
+    // Textes centrés
+    tpLabel.paint(canvas, Offset(bx + (bw - tpLabel.width) / 2, byFixed + vP));
+    tpVal.paint(canvas, Offset(bx + (bw - tpVal.width) / 2, byFixed + vP + tpLabel.height + lineGap));
+
+    // ── Connecteur : badge → point ──────────────────────────────────────────
+    final connY1 = byFixed + bh + 1;
+    final connY2 = py - 5;
+    if (connY2 > connY1) {
+      canvas.drawLine(Offset(px, connY1), Offset(px, connY2),
+        Paint()
+          ..color = const Color(0xFF60a5fa).withValues(alpha: 0.6)
+          ..strokeWidth = 1.0);
+    }
+
+    // Marqueur point
+    canvas.drawCircle(Offset(px, py), 4.5, Paint()..color = const Color(0xFF1e3a8a));
+    canvas.drawCircle(Offset(px, py), 4.5, Paint()
+      ..color = const Color(0xFF93c5fd)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8);
+  }
+
+  @override
+  bool shouldRepaint(_SpeedProfilePainter old) => old.speeds != speeds;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // PAINTER : profil altimétrique
-// ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
 class _AltitudeProfilePainter extends CustomPainter {
   final List<double> alts;
-  const _AltitudeProfilePainter(this.alts);
+  final double? altStart;
+  final double? altEnd;
+
+  const _AltitudeProfilePainter(this.alts, {this.altStart, this.altEnd});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1333,104 +1765,149 @@ class _AltitudeProfilePainter extends CustomPainter {
     final maxAlt = alts.reduce(max);
     final range  = (maxAlt - minAlt).clamp(1.0, double.infinity);
 
-    // Padding haut pour les badges, bas pour la ligne de base
-    const topPad = 26.0;
-    const botPad = 6.0;
-    final drawH = size.height - topPad - botPad;
+    // Espace réservé : en haut pour ALT MAX + badges coins,
+    // en bas pour ALT MIN placé sous le point minimum.
+    const topPad = 50.0;
+    const botPad = 46.0;
+    final drawH  = size.height - topPad - botPad;
 
-    double xOf(int i) => i / (alts.length - 1) * size.width;
+    double xOf(int i)      => i / (alts.length - 1) * size.width;
     double yOf(double alt) => topPad + drawH - ((alt - minAlt) / range) * drawH;
 
-    final path = ui.Path();
-    path.moveTo(xOf(0), yOf(alts[0]));
-    for (int i = 1; i < alts.length; i++) {
-      path.lineTo(xOf(i), yOf(alts[i]));
-    }
+    // ── Aire remplie ──────────────────────────────────────────────────────────
+    final linePath = ui.Path()..moveTo(xOf(0), yOf(alts[0]));
+    for (int i = 1; i < alts.length; i++) { linePath.lineTo(xOf(i), yOf(alts[i])); }
 
-    // Remplissage dégradé
-    final fillPath = ui.Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-
-    final gradient = ui.Gradient.linear(
-      Offset(0, topPad), Offset(0, size.height),
-      [const Color(0xFFfb923c).withValues(alpha: 0.45), const Color(0xFFfb923c).withValues(alpha: 0.02)],
+    canvas.drawPath(
+      ui.Path.from(linePath)
+        ..lineTo(size.width, size.height)
+        ..lineTo(0, size.height)
+        ..close(),
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(0, topPad), Offset(0, size.height),
+          [const Color(0xFFfb923c).withValues(alpha: 0.40),
+           const Color(0xFFfb923c).withValues(alpha: 0.01)],
+        )
+        ..style = PaintingStyle.fill,
     );
-    canvas.drawPath(fillPath, Paint()..shader = gradient..style = PaintingStyle.fill);
 
-    // Ligne
-    canvas.drawPath(path, Paint()
+    canvas.drawPath(linePath, Paint()
       ..color = const Color(0xFFfb923c)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round);
 
-    // Indices des points min et max
+    // ── Indices ───────────────────────────────────────────────────────────────
     int maxIdx = 0, minIdx = 0;
     for (int i = 1; i < alts.length; i++) {
       if (alts[i] > alts[maxIdx]) maxIdx = i;
       if (alts[i] < alts[minIdx]) minIdx = i;
     }
 
-    // Dessin d'un marqueur cercle + badge étiquette au-dessus du point
-    void drawBadge(int idx, String label) {
-      final x = xOf(idx);
-      final y = yOf(alts[idx]);
-
-      // Cercle marqueur sur la courbe
-      canvas.drawCircle(Offset(x, y), 4.5,
-          Paint()..color = const Color(0xFF111111)..style = PaintingStyle.fill);
-      canvas.drawCircle(Offset(x, y), 4.5,
-          Paint()
-            ..color = const Color(0xFFfb923c)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.5);
-
-      // Badge pill au-dessus du cercle
-      const hPad = 7.0;
-      const vPad = 3.5;
-      const gap  = 7.0;
-      final tp = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: const TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w700,
-            color: Color(0xFFFFFFFF),
-            letterSpacing: 0.2,
-          ),
-        ),
+    // ── Utilitaires ───────────────────────────────────────────────────────────
+    TextPainter tp(String text, double fs, Color color, {FontWeight fw = FontWeight.w600, double ls = 0}) =>
+      TextPainter(
+        text: TextSpan(text: text, style: TextStyle(fontSize: fs, fontWeight: fw, color: color, letterSpacing: ls)),
         textDirection: TextDirection.ltr,
       )..layout();
 
-      final bw = tp.width + hPad * 2;
-      final bh = tp.height + vPad * 2;
-
-      // Badge centré sur x, au-dessus du cercle, clampé dans le canvas
-      double bx = (x - bw / 2).clamp(2.0, size.width - bw - 2);
-      double by = (y - 4.5 - gap - bh).clamp(2.0, size.height - bh - 2);
-
-      final badgeRRect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(bx, by, bw, bh),
-        const Radius.circular(9),
-      );
-      canvas.drawRRect(badgeRRect, Paint()..color = const Color(0xFF252525));
-      tp.paint(canvas, Offset(bx + hPad, by + vPad));
+    void drawMarker(double x, double y, {double r = 4.5, double alpha = 1.0}) {
+      canvas.drawCircle(Offset(x, y), r, Paint()..color = const Color(0xFF111111));
+      canvas.drawCircle(Offset(x, y), r, Paint()
+        ..color = const Color(0xFFfb923c).withValues(alpha: alpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4);
     }
 
-    drawBadge(maxIdx, '${maxAlt.toStringAsFixed(0)} m MAX');
-    drawBadge(minIdx, '${minAlt.toStringAsFixed(0)} m MIN');
+    void drawConnector(double x1, double y1, double x2, double y2, {double alpha = 0.35}) {
+      canvas.drawLine(Offset(x1, y1), Offset(x2, y2), Paint()
+        ..color = const Color(0xFFfb923c).withValues(alpha: alpha)
+        ..strokeWidth = 0.8);
+    }
+
+    // ── Badge coin (DÉPART / ARRIVÉE) — priorité secondaire ──────────────────
+    // Positionné en coin fixe, relié au vrai point par un trait discret.
+    void drawCornerBadge(int idx, String label, String value, {required bool isLeft}) {
+      final px = xOf(idx);
+      final py = yOf(alts[idx]);
+
+      final tpL = tp(label, 8, const Color(0xFF777777), ls: 0.3);
+      final tpV = tp(value, 10, const Color(0xFFCCCCCC), fw: FontWeight.w700);
+
+      const hP = 6.0; const vP = 3.5; const lG = 1.5;
+      final bw = max(tpL.width, tpV.width) + hP * 2;
+      final bh = tpL.height + lG + tpV.height + vP * 2;
+      final bx = isLeft ? 2.0 : size.width - bw - 2;
+      const by = 2.0;
+
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(bx, by, bw, bh), const Radius.circular(6)),
+        Paint()..color = const Color(0xFF1A1E22).withValues(alpha: 0.88),
+      );
+      tpL.paint(canvas, Offset(bx + (bw - tpL.width) / 2, by + vP));
+      tpV.paint(canvas, Offset(bx + (bw - tpV.width) / 2, by + vP + tpL.height + lG));
+
+      // Connecteur du coin au vrai point
+      final anchorX = bx + (isLeft ? bw : 0);
+      final anchorY = by + bh / 2;
+      drawConnector(anchorX, anchorY, px, py, alpha: 0.25);
+      drawMarker(px, py, r: 3.5, alpha: 0.55);
+    }
+
+    // ── Badge principal (ALT MAX / ALT MIN) — priorité forte ─────────────────
+    void drawMainBadge(int idx, String label, String value, {
+      required bool above,
+      bool highlighted = false,
+    }) {
+      final x = xOf(idx);
+      final y = yOf(alts[idx]);
+
+      const hP = 8.0; const vP = 5.0; const lG = 2.0; const gap = 7.0;
+
+      final tpL = tp(label, 9,
+        highlighted ? Colors.white.withValues(alpha: 0.92) : const Color(0xFFbbbbbb),
+        ls: 0.3);
+      final tpV = tp(value, 13, Colors.white, fw: FontWeight.bold);
+
+      final bw = max(tpL.width, tpV.width) + hP * 2;
+      final bh = tpL.height + lG + tpV.height + vP * 2;
+
+      final bx = (x - bw / 2).clamp(2.0, size.width - bw - 2);
+      final by = above
+          ? (y - 4.5 - gap - bh).clamp(0.0, size.height - bh - 2)
+          : (y + 4.5 + gap).clamp(0.0, size.height - bh - 2);
+
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(bx, by, bw, bh), const Radius.circular(8)),
+        Paint()..color = highlighted ? const Color(0xFFe07820) : const Color(0xFF21262D),
+      );
+      tpL.paint(canvas, Offset(bx + (bw - tpL.width) / 2, by + vP));
+      tpV.paint(canvas, Offset(bx + (bw - tpV.width) / 2, by + vP + tpL.height + lG));
+
+      // Connecteur et marqueur
+      final connY1 = above ? by + bh + 1 : by - 1;
+      final connY2 = above ? y - 4.5 : y + 4.5;
+      drawConnector(x, connY1, x, connY2, alpha: highlighted ? 0.55 : 0.35);
+      drawMarker(x, y, alpha: highlighted ? 1.0 : 0.8);
+    }
+
+    // Ordre de dessin : coins (low priority) → MIN → MAX (par-dessus tout)
+    drawCornerBadge(0,               'DÉPART',  '${(altStart ?? alts.first).toStringAsFixed(0)} m', isLeft: true);
+    drawCornerBadge(alts.length - 1, 'ARRIVÉE', '${(altEnd   ?? alts.last ).toStringAsFixed(0)} m', isLeft: false);
+    drawMainBadge(minIdx, 'ALT MIN', '${alts[minIdx].toStringAsFixed(0)} m', above: false);
+    drawMainBadge(maxIdx, 'ALT MAX', '${alts[maxIdx].toStringAsFixed(0)} m', above: true, highlighted: true);
   }
 
   @override
-  bool shouldRepaint(_AltitudeProfilePainter old) => old.alts != alts;
+  bool shouldRepaint(_AltitudeProfilePainter old) =>
+      old.alts != alts || old.altStart != altStart || old.altEnd != altEnd;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// SUPPRESSION (inchangée)
-// ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+// SUPPRESSION
+// ════════════════════════════════════════════════════════════════════════════
 Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool popAfterDelete = false}) async {
   try {
     final safetySessionId = ride['safetySessionId'];
@@ -1460,6 +1937,8 @@ Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool p
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sortie supprimée')));
     }
   } catch (e) {
-    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur suppression : $e')));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur suppression : $e')));
+    }
   }
 }

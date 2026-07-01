@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
 import '../widgets/ride_trace_thumbnail.dart';
+import '../widgets/ride_share_card.dart';
 
 import 'package:intl/intl.dart';
 
@@ -700,6 +701,104 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // -------------------------------------------------------------------------
+  // MENU RAPIDE PAR RIDE
+  // -------------------------------------------------------------------------
+
+  void _showRideQuickMenu({
+    required BuildContext context,
+    required Map ride,
+    required dynamic rideKey,
+    required String rideName,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 36, height: 4,
+              margin: const EdgeInsets.only(bottom: 18),
+              decoration: BoxDecoration(
+                color: Colors.white24, borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            _rideMenuItem(
+              icon: Icons.image_outlined,
+              iconColor: Colors.purple,
+              title: 'Partager un résumé',
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => RideSharePreviewScreen(
+                    ride: Map<String, dynamic>.from(ride),
+                    rideName: rideName,
+                  ),
+                ));
+              },
+            ),
+            const SizedBox(height: 8),
+            _rideMenuItem(
+              icon: Icons.delete_outline,
+              iconColor: Colors.red,
+              title: 'Supprimer la sortie',
+              titleColor: Colors.red,
+              onTap: () async {
+                Navigator.pop(sheetCtx);
+                await deleteRide(context, ride, rideKey);
+              },
+            ),
+            const SizedBox(height: 4),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _rideMenuItem({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    Color? titleColor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A2A2A),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(children: [
+          Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: iconColor, size: 20),
+          ),
+          const SizedBox(width: 14),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: titleColor ?? Colors.white,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // BUILD
   // -------------------------------------------------------------------------
 
@@ -1191,8 +1290,28 @@ class _HomeScreenState extends State<HomeScreen> {
                                         ],
                                       ),
                                     ),
-                                    const SizedBox(width: 4),
-                                    const Icon(Icons.chevron_right, color: Colors.orange, size: 26),
+                                    const SizedBox(width: 2),
+                                    GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () => _showRideQuickMenu(
+                                        context: context,
+                                        ride: ride,
+                                        rideKey: rideKey,
+                                        rideName: (ride['name'] as String?) ?? departureTime,
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(left: 4, top: 2),
+                                        child: Container(
+                                          width: 36,
+                                          height: 36,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: Border.all(color: const Color(0xFFFF8A00), width: 1.8),
+                                          ),
+                                          child: const Icon(Icons.more_vert, color: Color(0xFFFF8A00), size: 20),
+                                        ),
+                                      ),
+                                    ),
                                   ],
                                 ),
                                 const SizedBox(height: 12),

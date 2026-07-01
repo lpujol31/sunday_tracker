@@ -11,6 +11,7 @@ import 'package:geocoding/geocoding.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 import 'package:share_plus/share_plus.dart';
+import '../services/share_image_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
@@ -186,6 +187,10 @@ class _RideScreenState extends State<RideScreen> {
 
   // ── Points avec altitude (remplace ridePoints dans saveRide) ──
   final List<Map<String, dynamic>> _pointsWithAlt = [];
+
+  // ── Persistance GPS ───────────────────────────────────────────
+  final List<Map<String, dynamic>> _uploadQueue = []; // points en attente d'upload Supabase
+  Box? _currentRideBox; // Hive crash-safety
 
   double totalDistance = 0;
   final Distance distanceCalculator = const Distance();
@@ -565,6 +570,21 @@ class _RideScreenState extends State<RideScreen> {
   // ── Mode édition (réordonnage) ────────────────────────────────
   bool _editMode = false;
 
+  // ── Position bandeau cockpit ──────────────────────────────────
+  static const String _prefBannerPosition = 'cockpit_banner_position';
+  String _bannerPosition = 'top'; // 'top' | 'bottom' | 'left'
+  bool _isBannerDragging = false;
+  double _bannerDragDeltaY = 0;
+  double _bannerDragDeltaX = 0;
+  final GlobalKey _cockpitControlsKey = GlobalKey();
+
+  double get _cockpitControlsHeight {
+    final ctx = _cockpitControlsKey.currentContext;
+    if (ctx == null) return 210 + MediaQuery.of(context).padding.bottom;
+    final box = ctx.findRenderObject() as RenderBox?;
+    return box?.size.height ?? 210 + MediaQuery.of(context).padding.bottom;
+  }
+
   // ── Blocs collapsibles ─────────────────────────────────────────
   static const String _prefBlocksCollapsed = 'ride_blocks_collapsed';
   static const String _prefBlocksOrder = 'ride_blocks_order';
@@ -626,6 +646,17 @@ class _RideScreenState extends State<RideScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_prefBlocksOrder);
     await prefs.remove(_prefBlocksCollapsed);
+  }
+
+  Future<void> _loadBannerPosition() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pos = prefs.getString(_prefBannerPosition) ?? 'top';
+    if (mounted) setState(() => _bannerPosition = pos);
+  }
+
+  Future<void> _saveBannerPosition(String pos) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefBannerPosition, pos);
   }
 
   void _onBlockReorder(int oldIndex, int newIndex) {
@@ -1801,6 +1832,9 @@ class _RideScreenState extends State<RideScreen> {
       await positionStream?.cancel();
       rideTimer?.cancel();
       _pointsWithAlt.clear();
+      _uploadQueue.clear();
+      await _currentRideBox?.clear();
+      _currentRideBox = null;
       final sessionId = safetySessionId;
       safetySessionId = null;
       if (sessionId != null) {
@@ -1824,6 +1858,7 @@ class _RideScreenState extends State<RideScreen> {
     WakelockPlus.enable();
     _loadMapStyle();
     _loadBlockPrefs();
+    _loadBannerPosition();
     initializeGps();
   }
 
@@ -2093,20 +2128,28 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
-  // ── uploadSafetyPosition avec altitude ────────────────────────
-  Future<void> uploadSafetyPosition() async {
-    if (safetySessionId == null || currentPosition == null) return;
-    await Supabase.instance.client.from('safety_positions').insert({
-      'session_id': safetySessionId,
-      'latitude': currentPosition!.latitude,
-      'longitude': currentPosition!.longitude,
-      'altitude': currentPosition!.altitude, // ← nouveau
-    });
+  Future<void> _flushUploadQueue() async {
+    if (safetySessionId == null || _uploadQueue.isEmpty) return;
+    final batch = List<Map<String, dynamic>>.from(_uploadQueue);
+    _uploadQueue.clear();
+    try {
+      await Supabase.instance.client.from('safety_positions').insert(
+        batch.map((p) => {
+          'session_id': safetySessionId,
+          'latitude': p['lat'],
+          'longitude': p['lng'],
+          'altitude': p['alt'],
+        }).toList(),
+      );
+    } catch (e) {
+      _uploadQueue.insertAll(0, batch); // requeue si pas de réseau
+      debugPrint('[SAFETY] flush failed, requeued ${batch.length} pts: $e');
+    }
   }
 
   void startSafetyUploadTimer() {
     safetyUploadTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
-      await uploadSafetyPosition();
+      await _flushUploadQueue();
     });
   }
 
@@ -2120,6 +2163,8 @@ class _RideScreenState extends State<RideScreen> {
     safetySessionId = response['id'];
     safetyShareCode = shareCode;
     safetyUrl = 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
+    _currentRideBox = await Hive.openBox('current_ride');
+    await _currentRideBox!.clear();
     startSafetyUploadTimer();
   }
 
@@ -2290,7 +2335,44 @@ class _RideScreenState extends State<RideScreen> {
     final url = safetyUrl ?? 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
     final message =
         'Tout va bien, je suis de retour ! 🙌\n\nLa sortie est terminée — tu peux retrouver la trace ici :\n\n$url';
-    await Share.share(message, subject: 'Sunday Tracker');
+
+    final rideSnap = _buildShareRideSnapshot();
+    final imageFile = await ShareImageService.generateImage(
+      context,
+      rideSnap,
+      rideSnap['name'] as String,
+    );
+
+    if (imageFile != null) {
+      await Share.shareXFiles(
+        [XFile(imageFile.path)],
+        text: message,
+        subject: 'Sunday Tracker',
+      );
+    } else {
+      await Share.share(message, subject: 'Sunday Tracker');
+    }
+  }
+
+  Map<String, dynamic> _buildShareRideSnapshot() {
+    final start = (rideStartTime ?? DateTime.now()).toLocal();
+    const months = ['jan','fév','mar','avr','mai','juin','juil','aoû','sep','oct','nov','déc'];
+    const days   = ['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'];
+    final autoName = 'Sortie du ${days[start.weekday - 1]} ${start.day} ${months[start.month - 1]}';
+    return {
+      'name':                    _customRideName ?? autoName,
+      'startTime':               rideStartTime?.toUtc().toIso8601String(),
+      'endTime':                 DateTime.now().toUtc().toIso8601String(),
+      'durationSeconds':         rideDuration.inSeconds,
+      'distanceMeters':          totalDistance,
+      'totalElevationMeters':    _dPlus,
+      'totalElevationDown':      _dMinus,
+      'altitudeMax':             _altMax.isInfinite ? null : _altMax,
+      'altitudeMin':             _altMin.isInfinite ? null : _altMin,
+      'points':                  _pointsWithAlt,
+      'city':                    null,
+      'practice':                null,
+    };
   }
 
   Future<void> cancelRide() async {
@@ -2298,6 +2380,9 @@ class _RideScreenState extends State<RideScreen> {
     await positionStream?.cancel();
     rideTimer?.cancel();
     _pointsWithAlt.clear();
+    _uploadQueue.clear();
+    await _currentRideBox?.clear();
+    _currentRideBox = null;
     final sessionId = safetySessionId;
     safetySessionId = null;
     if (sessionId != null) {
@@ -2369,6 +2454,51 @@ class _RideScreenState extends State<RideScreen> {
 
   // ── saveRide avec toutes les nouvelles clés ───────────────────
   Future<void> saveRide() async {
+    safetyUploadTimer?.cancel();
+    safetyUploadTimer = null;
+
+    final progressNotifier = ValueNotifier<_SaveState>(
+      const _SaveState('Synchronisation GPS…', 0.0),
+    );
+    if (mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _SaveProgressDialog(notifier: progressNotifier),
+      );
+    }
+
+    // Flush GPS queue vers Supabase
+    if (safetySessionId != null && _uploadQueue.isNotEmpty) {
+      final total = _uploadQueue.length;
+      int sent = 0;
+      const chunkSize = 100;
+      while (_uploadQueue.isNotEmpty) {
+        final chunk = _uploadQueue.take(chunkSize).toList();
+        try {
+          await Supabase.instance.client.from('safety_positions').insert(
+            chunk.map((p) => {
+              'session_id': safetySessionId,
+              'latitude': p['lat'],
+              'longitude': p['lng'],
+              'altitude': p['alt'],
+            }).toList(),
+          );
+          _uploadQueue.removeRange(0, chunk.length);
+          sent += chunk.length;
+          progressNotifier.value = _SaveState(
+            'GPS · $sent / $total points',
+            sent / total * 0.5,
+          );
+        } catch (e) {
+          debugPrint('[SAFETY] flush chunk failed: $e');
+          break;
+        }
+      }
+    }
+
+    progressNotifier.value = const _SaveState('Sauvegarde locale…', 0.6);
+
     if (_weatherFetched) _weatherSnapshotEnd = _currentWeatherSnapshot();
     final box = await Hive.openBox('rides');
     final locationTags = await getRideLocationTags();
@@ -2446,16 +2576,27 @@ class _RideScreenState extends State<RideScreen> {
     } catch (e) {
       debugPrint('[HIVE] saveRide error: $e');
     }
+    await _currentRideBox?.clear();
+    _currentRideBox = null;
+
+    progressNotifier.value = const _SaveState('Sync cloud…', 0.8);
     _syncRideToSupabase(rideData);
-    if (safetySessionId == null) return;
-    await Supabase.instance.client
-        .from('safety_sessions')
-        .update({
-          'status': 'finished',
-          'ended_at': DateTime.now().toUtc().toIso8601String(),
-          'ride_json': rideData,
-        })
-        .eq('id', safetySessionId!);
+
+    progressNotifier.value = const _SaveState('Finalisation…', 0.9);
+    if (safetySessionId != null) {
+      await Supabase.instance.client
+          .from('safety_sessions')
+          .update({
+            'status': 'finished',
+            'ended_at': DateTime.now().toUtc().toIso8601String(),
+            'ride_json': rideData,
+          })
+          .eq('id', safetySessionId!);
+    }
+
+    progressNotifier.value = const _SaveState('Terminé !', 1.0);
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (mounted) Navigator.of(context).pop();
   }
 
   // ── startTracking avec collecte altitude ──────────────────────
@@ -2508,12 +2649,14 @@ class _RideScreenState extends State<RideScreen> {
             totalDistance += distance;
           }
           ridePoints.add(newPoint);
-          // ← Ajout du point avec altitude
-          _pointsWithAlt.add({
+          final gpsPoint = {
             'lat': position.latitude,
             'lng': position.longitude,
             'alt': position.altitude,
-          });
+          };
+          _pointsWithAlt.add(gpsPoint);
+          _uploadQueue.add(gpsPoint);
+          _currentRideBox?.add(gpsPoint);
           _lastPointTimestamp = position.timestamp;
         });
   }
@@ -2996,7 +3139,7 @@ class _RideScreenState extends State<RideScreen> {
 
     final isEdgeToEdge = topInset > 0;
     return Container(
-      padding: EdgeInsets.fromLTRB(16, topInset + 10, 16, 12),
+      padding: EdgeInsets.fromLTRB(16, topInset + 6, 16, 12),
       decoration: BoxDecoration(
         color: const Color(0xF2101010),
         borderRadius: isEdgeToEdge
@@ -3011,11 +3154,26 @@ class _RideScreenState extends State<RideScreen> {
           ),
         ],
       ),
-      child: DefaultTextStyle(
-        style: const TextStyle(decoration: noUnderline),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Poignée de déplacement (pill)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white54,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          DefaultTextStyle(
+            style: const TextStyle(decoration: noUnderline),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
             // Heure
             Expanded(
               child: Column(
@@ -3107,8 +3265,358 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ],
         ),
+          ),
+        ],
       ),
     );
+  }
+
+  Widget _buildCockpitBannerVertical() {
+    final now = DateTime.now();
+    final timeStr =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final durationStr = rideDuration.inHours > 0
+        ? formattedDuration()
+        : '${(rideDuration.inMinutes % 60).toString().padLeft(2, '0')}:'
+            '${(rideDuration.inSeconds % 60).toString().padLeft(2, '0')}';
+
+    const noUnderline = TextDecoration.none;
+    const labelStyle = TextStyle(
+      fontSize: 10,
+      color: Color(0xFF7A7A7A),
+      decoration: noUnderline,
+      fontWeight: FontWeight.w400,
+    );
+
+    Widget statSection(String value, String label, {double fontSize = 22}) =>
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              value,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              style: TextStyle(
+                fontSize: fontSize,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+                height: 1.0,
+                letterSpacing: -0.5,
+                decoration: noUnderline,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(label, style: labelStyle),
+          ],
+        );
+
+    return DefaultTextStyle(
+      style: const TextStyle(decoration: noUnderline),
+      child: Container(
+        width: 88,
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+        decoration: BoxDecoration(
+          color: const Color(0xF2101010),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08), width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.45),
+              blurRadius: 16,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Poignée
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                3,
+                (i) => Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 2.5),
+                  width: 4,
+                  height: 4,
+                  decoration: const BoxDecoration(
+                    color: Colors.white24,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            statSection(timeStr, 'heure', fontSize: 26),
+            Container(
+              height: 1,
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+            statSection(formattedDistance(), 'Distance'),
+            Container(
+              height: 1,
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              color: Colors.white.withValues(alpha: 0.08),
+            ),
+            statSection(durationStr, 'Durée'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Prédit la zone cible selon les deltas courants — logique partagée
+  // entre _buildBannerDropZones et onLongPressEnd.
+  String _predictBannerPos() {
+    final absX = _bannerDragDeltaX.abs();
+    final absY = _bannerDragDeltaY.abs();
+    if (absX < 30 && absY < 30) return _bannerPosition;
+    final isVertical =
+        _bannerPosition == 'left' || _bannerPosition == 'right';
+    if (isVertical) {
+      return absX >= absY
+          ? (_bannerDragDeltaY <= 0 ? 'top' : 'bottom')
+          : _bannerPosition;
+    } else {
+      if (absX > absY) {
+        return _bannerDragDeltaX < 0 ? 'left' : 'right';
+      }
+      return _bannerDragDeltaY < 0 ? 'top' : 'bottom';
+    }
+  }
+
+  List<Widget> _buildBannerDropZones({
+    required bool fullscreen,
+    double topInset = 0,
+  }) {
+    if (!_isBannerDragging) return [];
+    final controlsH = _cockpitControlsHeight;
+    const vW = 110.0; // largeur zones latérales
+
+    final predictedPos = _predictBannerPos();
+
+    // ── Zone horizontale (Haut / Bas) ─────────────────────────────
+    Widget hZone({
+      required String posId,
+      required double? top,
+      required double? bottom,
+      required String label,
+      required IconData icon,
+    }) {
+      final isTarget = predictedPos == posId;
+      const accent = Color(0xFF29B6F6);
+      return Positioned(
+        top: top,
+        bottom: bottom,
+        left: 8,
+        right: 8,
+        child: GestureDetector(
+          onTap: () {
+            setState(() {
+              _bannerPosition = posId;
+              _isBannerDragging = false;
+              _bannerDragDeltaY = 0;
+              _bannerDragDeltaX = 0;
+            });
+            _saveBannerPosition(posId);
+            HapticFeedback.lightImpact();
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            height: 72,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: isTarget ? 0.40 : 0.22),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: accent.withValues(alpha: isTarget ? 1.0 : 0.75),
+                width: isTarget ? 2.5 : 1.5,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon,
+                    color:
+                        accent.withValues(alpha: isTarget ? 1.0 : 0.85),
+                    size: isTarget ? 24 : 20),
+                const SizedBox(width: 8),
+                Text(label,
+                    style: TextStyle(
+                      color: accent.withValues(
+                          alpha: isTarget ? 1.0 : 0.85),
+                      fontSize: isTarget ? 17 : 14,
+                      fontWeight: isTarget
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                      decoration: TextDecoration.none,
+                    )),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ── Zone verticale (Gauche / Droite) ──────────────────────────
+    Widget vZone({
+      required String posId,
+      required double? left,
+      required double? right,
+      required String label,
+    }) {
+      final isTarget = predictedPos == posId;
+      const accent = Color(0xFF29B6F6);
+      // Gauche : sous Repère/Danger (fin à ~188px) · Droite : sous boutons carte (fin à ~296px)
+      final topValue = left != null
+          ? (fullscreen ? topInset + 200.0 : 200.0)
+          : (fullscreen ? topInset + 310.0 : 310.0);
+      return Positioned(
+        top: topValue,
+        left: left,
+        right: right,
+        child: GestureDetector(
+          onTap: () {
+            setState(() {
+              _bannerPosition = posId;
+              _isBannerDragging = false;
+              _bannerDragDeltaY = 0;
+              _bannerDragDeltaX = 0;
+            });
+            _saveBannerPosition(posId);
+            HapticFeedback.lightImpact();
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: vW,
+            height: 160,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: isTarget ? 0.40 : 0.22),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: accent.withValues(alpha: isTarget ? 1.0 : 0.75),
+                width: isTarget ? 2.5 : 1.5,
+              ),
+            ),
+            child: Center(
+              child: Text(label,
+                  style: TextStyle(
+                    color: accent.withValues(alpha: isTarget ? 1.0 : 0.85),
+                    fontSize: isTarget ? 15 : 13,
+                    fontWeight:
+                        isTarget ? FontWeight.bold : FontWeight.normal,
+                    decoration: TextDecoration.none,
+                  )),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return [
+      // Barrière transparente : tap hors zone = annuler la sélection
+      Positioned.fill(
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: () {
+            setState(() {
+              _isBannerDragging = false;
+              _bannerDragDeltaY = 0;
+              _bannerDragDeltaX = 0;
+            });
+          },
+        ),
+      ),
+      if (_bannerPosition != 'left')
+        vZone(posId: 'left', left: 8, right: null, label: 'Gauche'),
+      if (_bannerPosition != 'right')
+        vZone(posId: 'right', left: null, right: 8, label: 'Droite'),
+      if (_bannerPosition != 'top')
+        hZone(
+          posId: 'top',
+          top: fullscreen ? topInset + 4 : 4,
+          bottom: null,
+          label: 'Haut',
+          icon: Icons.keyboard_arrow_up_rounded,
+        ),
+      if (_bannerPosition != 'bottom')
+        hZone(
+          posId: 'bottom',
+          top: null,
+          bottom: controlsH + 8,
+          label: 'Bas',
+          icon: Icons.keyboard_arrow_down_rounded,
+        ),
+    ];
+  }
+
+  Widget _buildPositionedBanner({required bool fullscreen, double topInset = 0}) {
+    final controlsH = _cockpitControlsHeight;
+
+    final isTop = _bannerPosition == 'top';
+    final isLeft = _bannerPosition == 'left';
+    final isRight = _bannerPosition == 'right';
+    final isVertical = isLeft || isRight;
+
+    // En fullscreen + top non dragging : mode edge-to-edge
+    final edgeToEdge = fullscreen && isTop && !_isBannerDragging;
+    final effectiveTopInset = edgeToEdge ? topInset : 0.0;
+    final side = edgeToEdge ? 0.0 : 12.0;
+
+    // Widget affiché selon la position courante
+    Widget bannerContent = isVertical
+        ? _buildCockpitBannerVertical()
+        : _buildCockpitBanner(topInset: effectiveTopInset);
+
+    final banner = GestureDetector(
+      onLongPressStart: (_) {
+        HapticFeedback.mediumImpact();
+        setState(() {
+          _isBannerDragging = true;
+          _bannerDragDeltaY = 0;
+          _bannerDragDeltaX = 0;
+        });
+      },
+      onLongPressEnd: (_) {
+        // Zones restent visibles : l'utilisateur tape sur la zone cible
+      },
+      child: AnimatedOpacity(
+        opacity: _isBannerDragging ? 0.75 : 1.0,
+        duration: const Duration(milliseconds: 150),
+        child: bannerContent,
+      ),
+    );
+
+    // ── Position snappée ─────────────────────────────────────────
+    if (isLeft) {
+      return Positioned(
+        top: fullscreen ? topInset + 200 : 200,
+        left: 12,
+        child: banner,
+      );
+    } else if (isRight) {
+      return Positioned(
+        top: fullscreen ? topInset + 310 : 310,
+        right: 12,
+        child: banner,
+      );
+    } else if (isTop) {
+      return Positioned(
+        top: edgeToEdge ? 0 : 12.0,
+        left: side,
+        right: side,
+        child: banner,
+      );
+    } else {
+      return Positioned(
+        bottom: controlsH + 4,
+        left: 12,
+        right: 12,
+        child: banner,
+      );
+    }
   }
 
   Widget _buildCockpitMapButtons({double topOffset = 108}) {
@@ -3202,78 +3710,204 @@ class _RideScreenState extends State<RideScreen> {
 
   Widget _buildCockpitControls() {
     final bottomPad = MediaQuery.of(context).padding.bottom;
-    return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF0D0D0D),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      padding: EdgeInsets.fromLTRB(12, 0, 12, 12 + bottomPad),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          GestureDetector(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Pill "Détails" flottante — aucun fond sous elle
+        Center(
+          child: GestureDetector(
             onTap: _showDetailSheet,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1E1E1E),
-                    borderRadius: BorderRadius.circular(20),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.72),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 8,
                   ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.keyboard_arrow_up, color: Colors.white54, size: 16),
-                      SizedBox(width: 5),
-                      Text(
-                        'Détails',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.white60,
-                          fontWeight: FontWeight.w500,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                    ],
+                ],
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.keyboard_arrow_up, color: Colors.white54, size: 14),
+                  SizedBox(width: 4),
+                  Text(
+                    'Détails',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.white60,
+                      fontWeight: FontWeight.w500,
+                      decoration: TextDecoration.none,
+                    ),
                   ),
-                ),
+                ],
               ),
             ),
           ),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: rideIsPaused ? Colors.green : Colors.blue,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(18),
-                ),
-              ),
-              onPressed: togglePauseRide,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
+        ),
+        // Barre d'actions compacte : Stop | Pause | SOS
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.88),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPad),
+          child: SizedBox(
+            height: 56,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Stop (gauche, compact)
+                GestureDetector(
+                  onTap: () async {
+                    await stopTrackingImmediately();
+                    await _showExitRideModal();
+                  },
+                  child: Container(
+                    width: 76,
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      shape: BoxShape.circle,
+                      color: const Color(0xFF1A1A1A),
+                      borderRadius: BorderRadius.circular(16),
                     ),
-                    child: Icon(
-                      rideIsPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
-                      color: Colors.white,
-                      size: 26,
+                    child: const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.stop, color: Colors.red, size: 22),
+                        SizedBox(height: 2),
+                        Text(
+                          'Stop',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white70,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 14),
+                ),
+                const SizedBox(width: 8),
+                // Pause (centre, dominant)
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: rideIsPaused ? Colors.green : Colors.blue,
+                      padding: EdgeInsets.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    onPressed: togglePauseRide,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            rideIsPaused
+                                ? Icons.play_arrow_rounded
+                                : Icons.pause_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          rideIsPaused ? 'Reprendre' : 'Pause',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // SOS (droite, compact)
+                GestureDetector(
+                  onTap: () {},
+                  child: Container(
+                    width: 76,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFB71C1C),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.emergency, color: Colors.white, size: 22),
+                        SizedBox(height: 2),
+                        Text(
+                          'SOS',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Groupe de boutons d'action ride flottants en haut à gauche de la carte
+  Widget _buildWaypointFloatingBtn({double topOffset = 108}) {
+    return Positioned(
+      top: topOffset,
+      left: 12,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Repère (actif) ──────────────────────────────────────
+          GestureDetector(
+            onTap: _showAddWaypointModal,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.78),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: Colors.blue.withValues(alpha: 0.45),
+                  width: 1.5,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 8,
+                  ),
+                ],
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.place, color: Colors.blue, size: 20),
+                  SizedBox(width: 8),
                   Text(
-                    rideIsPaused ? 'Reprendre' : 'Pause',
-                    style: const TextStyle(
-                      fontSize: 22,
+                    'Repère',
+                    style: TextStyle(
+                      fontSize: 13,
                       fontWeight: FontWeight.bold,
                       color: Colors.white,
                       decoration: TextDecoration.none,
@@ -3284,88 +3918,44 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _buildCockpitActionBtn(
-                  icon: Icons.stop,
-                  iconColor: Colors.red,
-                  label: 'Arrêter',
-                  bg: const Color(0xFF1A1A1A),
-                  onTap: () async {
-                    await stopTrackingImmediately();
-                    await _showExitRideModal();
-                  },
+          // ── Danger (désactivé — fonctionnalité à venir) ─────────
+          Opacity(
+            opacity: 0.55,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.78),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: Colors.orange.withValues(alpha: 0.45),
+                  width: 1.5,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 8,
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _buildCockpitActionBtn(
-                  icon: Icons.place,
-                  iconColor: Colors.blue,
-                  label: 'Waypoint',
-                  bg: const Color(0xFF1A1A1A),
-                  onTap: _showAddWaypointModal,
-                ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.fmd_bad, color: Colors.orange, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Danger',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _buildCockpitActionBtn(
-                  icon: Icons.emergency,
-                  iconColor: Colors.white,
-                  label: 'SOS',
-                  bg: Colors.red,
-                  onTap: () {},
-                ),
-              ),
-            ],
+            ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildCockpitActionBtn({
-    required IconData icon,
-    required Color iconColor,
-    required String label,
-    required Color bg,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: bg == Colors.red
-                    ? Colors.white.withValues(alpha: 0.2)
-                    : iconColor.withValues(alpha: 0.15),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(icon, color: iconColor, size: 17),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                color: bg == Colors.red ? Colors.white : Colors.white70,
-                decoration: TextDecoration.none,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -3602,18 +4192,18 @@ class _RideScreenState extends State<RideScreen> {
                             children: [
                               if (!_mapFullscreen) Positioned.fill(child: _buildFlutterMap()),
                               _buildCockpitMapButtons(),
-                              Positioned(
-                                top: 12,
-                                left: 12,
-                                right: 12,
-                                child: _buildCockpitBanner(),
-                              ),
+                              ..._buildBannerDropZones(fullscreen: false),
+                              _buildPositionedBanner(fullscreen: false),
                               Positioned(
                                 bottom: 0,
                                 left: 0,
                                 right: 0,
-                                child: _buildCockpitControls(),
+                                child: KeyedSubtree(
+                                  key: _cockpitControlsKey,
+                                  child: _buildCockpitControls(),
+                                ),
                               ),
+                              _buildWaypointFloatingBtn(),
                             ],
                           ),
                         ),
@@ -3768,13 +4358,13 @@ class _RideScreenState extends State<RideScreen> {
                     _buildCockpitMapButtons(
                       topOffset: MediaQuery.of(context).padding.top + 92,
                     ),
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: _buildCockpitBanner(
-                        topInset: MediaQuery.of(context).padding.top,
-                      ),
+                    ..._buildBannerDropZones(
+                      fullscreen: true,
+                      topInset: MediaQuery.of(context).padding.top,
+                    ),
+                    _buildPositionedBanner(
+                      fullscreen: true,
+                      topInset: MediaQuery.of(context).padding.top,
                     ),
                     Positioned(
                       bottom: 0,
@@ -3782,12 +4372,67 @@ class _RideScreenState extends State<RideScreen> {
                       right: 0,
                       child: _buildCockpitControls(),
                     ),
+                    _buildWaypointFloatingBtn(
+                      topOffset: MediaQuery.of(context).padding.top + 92,
+                    ),
                   ],
                 ],
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Sauvegarde fin de ride ─────────────────────────────────────────────────
+
+class _SaveState {
+  final String label;
+  final double value; // 0.0 → 1.0
+  const _SaveState(this.label, this.value);
+}
+
+class _SaveProgressDialog extends StatelessWidget {
+  final ValueNotifier<_SaveState> notifier;
+  const _SaveProgressDialog({super.key, required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<_SaveState>(
+      valueListenable: notifier,
+      builder: (_, state, _x) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        content: Padding(
+          padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Sauvegarde en cours…',
+                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 16),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: state.value,
+                  minHeight: 6,
+                  backgroundColor: Colors.white12,
+                  valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFFF8A00)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                state.label,
+                style: const TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
