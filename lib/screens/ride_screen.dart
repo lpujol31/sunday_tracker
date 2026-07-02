@@ -12,6 +12,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 import 'package:share_plus/share_plus.dart';
 import '../services/share_image_service.dart';
+import '../utils/date_labels.dart';
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
@@ -211,6 +212,13 @@ class _RideScreenState extends State<RideScreen> {
   final List<Map<String, dynamic>> rideWaypoints = [];
   final ImagePicker _imagePicker = ImagePicker();
 
+  // ── Pause cockpit ─────────────────────────────────────────────
+  DateTime? _pauseStartTime;
+  DateTime? _lastGpsUpdateTime;
+  String _gpsLabelBeforePause = 'Bon';
+  Color _gpsColorBeforePause = const Color(0xFF4ade80);
+  final List<double> _speedPoints = [];
+
   // ── Nom & note personnalisés ───────────────────────────────────
   String? _customRideName;
   String _rideNote = '';
@@ -299,6 +307,8 @@ class _RideScreenState extends State<RideScreen> {
   void _updateSpeedAndElevation(Position position) {
     final spd = (position.speed * 3.6).clamp(0.0, 200.0);
     _speedKmh = spd;
+    _lastGpsUpdateTime = DateTime.now();
+    _speedPoints.add(spd);
     if (spd > _maxSpeedKmh) _maxSpeedKmh = spd;
     if (spd > 0.5) {
       _speedSum += spd;
@@ -584,6 +594,52 @@ class _RideScreenState extends State<RideScreen> {
     final box = ctx.findRenderObject() as RenderBox?;
     return box?.size.height ?? 210 + MediaQuery.of(context).padding.bottom;
   }
+
+  // ── Géométrie cockpit : blocs de boutons + cartouche latérale ──
+  // Source unique pour aligner boutons et cartouche dans les 2 modes.
+  static const double _rightBtnBlockH = 122; // Localiser + Topo (le + grand)
+  static const double _bannerGap = 28;       // écart boutons ↔ cartouche
+
+  // Haut des blocs de boutons.
+  // - montés (+12) : ils comblent le vide en haut ;
+  // - descendus (+92) : uniquement quand la cartouche occupe le haut, pour
+  //   laisser la place au bandeau horizontal.
+  double _buttonsTopFor({
+    required bool raised,
+    required bool fullscreen,
+    required double topInset,
+  }) {
+    if (fullscreen) return topInset + (raised ? 12 : 92);
+    return raised ? 12 : 108;
+  }
+
+  double _cockpitButtonsTop(bool fullscreen, double topInset) {
+    // Montés partout sauf quand le bandeau est ancré en haut.
+    final raised = _bannerPosition != 'top';
+    return _buttonsTopFor(
+        raised: raised, fullscreen: fullscreen, topInset: topInset);
+  }
+
+  // Cartouche latérale : même hauteur à gauche et à droite (symétrie), calée
+  // sous le plus grand des deux blocs de boutons pour ne rien chevaucher.
+  // Suppose toujours l'état « boutons montés » : dès qu'elle est à
+  // gauche/droite, les boutons sont forcément montés.
+  double _sideBannerTop(bool fullscreen, double topInset) =>
+      _buttonsTopFor(raised: true, fullscreen: fullscreen, topInset: topInset) +
+      _rightBtnBlockH +
+      _bannerGap;
+
+  // Estompe et neutralise un overlay pendant le repositionnement de la
+  // cartouche : évite tout chevauchement visuel entre les zones cibles et
+  // les boutons carte/waypoint.
+  Widget _dragFade(Widget child) => IgnorePointer(
+        ignoring: _isBannerDragging,
+        child: AnimatedOpacity(
+          opacity: _isBannerDragging ? 0.0 : 1.0,
+          duration: const Duration(milliseconds: 150),
+          child: child,
+        ),
+      );
 
   // ── Blocs collapsibles ─────────────────────────────────────────
   static const String _prefBlocksCollapsed = 'ride_blocks_collapsed';
@@ -2357,8 +2413,7 @@ class _RideScreenState extends State<RideScreen> {
   Map<String, dynamic> _buildShareRideSnapshot() {
     final start = (rideStartTime ?? DateTime.now()).toLocal();
     const months = ['jan','fév','mar','avr','mai','juin','juil','aoû','sep','oct','nov','déc'];
-    const days   = ['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'];
-    final autoName = 'Sortie du ${days[start.weekday - 1]} ${start.day} ${months[start.month - 1]}';
+    final autoName = 'Sortie du ${kFrDaysShort[start.weekday - 1]} ${start.day} ${months[start.month - 1]}';
     return {
       'name':                    _customRideName ?? autoName,
       'startTime':               rideStartTime?.toUtc().toIso8601String(),
@@ -2394,6 +2449,9 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> togglePauseRide() async {
     if (!rideIsPaused) {
+      _pauseStartTime = DateTime.now();
+      _gpsLabelBeforePause = _gpsSignalLabel();
+      _gpsColorBeforePause = _gpsSignalColor();
       await positionStream?.cancel();
       positionStream = null;
       rideTimer?.cancel();
@@ -2517,16 +2575,7 @@ class _RideScreenState extends State<RideScreen> {
       'nov',
       'déc',
     ];
-    final days = [
-      'lundi',
-      'mardi',
-      'mercredi',
-      'jeudi',
-      'vendredi',
-      'samedi',
-      'dimanche',
-    ];
-    final day = days[start.weekday - 1];
+    final day = kFrDaysShort[start.weekday - 1];
     final hour = start.hour;
     final moment = hour < 6
         ? 'nuit'
@@ -2693,9 +2742,11 @@ class _RideScreenState extends State<RideScreen> {
     return '${(totalDistance / 1000).toStringAsFixed(2)} km';
   }
 
-  Future<void> _showEditModal() async {
+  Future<void> _showEditModal({bool focusNote = false}) async {
     final nameController = TextEditingController(text: _customRideName ?? _rideName());
     final noteController = TextEditingController(text: _rideNote);
+    final nameFocus = FocusNode();
+    final noteFocus = FocusNode();
     await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -2703,7 +2754,12 @@ class _RideScreenState extends State<RideScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (modalContext) => Padding(
+      builder: (modalContext) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (focusNote) noteFocus.requestFocus();
+          else nameFocus.requestFocus();
+        });
+        return Padding(
         padding: EdgeInsets.only(
           left: 24, right: 24, top: 24,
           bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24,
@@ -2721,6 +2777,7 @@ class _RideScreenState extends State<RideScreen> {
             const SizedBox(height: 8),
             TextField(
               controller: nameController,
+              focusNode: nameFocus,
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 filled: true,
@@ -2738,6 +2795,7 @@ class _RideScreenState extends State<RideScreen> {
             const SizedBox(height: 8),
             TextField(
               controller: noteController,
+              focusNode: noteFocus,
               style: const TextStyle(color: Colors.white),
               maxLines: 4,
               decoration: InputDecoration(
@@ -2778,7 +2836,8 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ],
         ),
-      ),
+      );
+      },
     );
   }
 
@@ -2796,10 +2855,7 @@ class _RideScreenState extends State<RideScreen> {
       'jan', 'fév', 'mar', 'avr', 'mai', 'juin',
       'juil', 'aoû', 'sep', 'oct', 'nov', 'déc',
     ];
-    const days = [
-      'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche',
-    ];
-    final day = days[date.weekday - 1];
+    final day = kFrDaysShort[date.weekday - 1];
     final hour = date.hour;
     final moment = hour < 6
         ? 'nuit'
@@ -3315,7 +3371,7 @@ class _RideScreenState extends State<RideScreen> {
     return DefaultTextStyle(
       style: const TextStyle(decoration: noUnderline),
       child: Container(
-        width: 88,
+        width: 108,
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
         decoration: BoxDecoration(
           color: const Color(0xF2101010),
@@ -3469,10 +3525,8 @@ class _RideScreenState extends State<RideScreen> {
     }) {
       final isTarget = predictedPos == posId;
       const accent = Color(0xFF29B6F6);
-      // Gauche : sous Repère/Danger (fin à ~188px) · Droite : sous boutons carte (fin à ~296px)
-      final topValue = left != null
-          ? (fullscreen ? topInset + 200.0 : 200.0)
-          : (fullscreen ? topInset + 310.0 : 310.0);
+      // Même hauteur à gauche et à droite (voir helpers géométrie)
+      final topValue = _sideBannerTop(fullscreen, topInset);
       return Positioned(
         top: topValue,
         left: left,
@@ -3592,13 +3646,13 @@ class _RideScreenState extends State<RideScreen> {
     // ── Position snappée ─────────────────────────────────────────
     if (isLeft) {
       return Positioned(
-        top: fullscreen ? topInset + 200 : 200,
+        top: _sideBannerTop(fullscreen, topInset),
         left: 12,
         child: banner,
       );
     } else if (isRight) {
       return Positioned(
-        top: fullscreen ? topInset + 310 : 310,
+        top: _sideBannerTop(fullscreen, topInset),
         right: 12,
         child: banner,
       );
@@ -3623,7 +3677,7 @@ class _RideScreenState extends State<RideScreen> {
     return Positioned(
       top: topOffset,
       right: 12,
-      child: Column(
+      child: _dragFade(Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           GestureDetector(
@@ -3649,23 +3703,6 @@ class _RideScreenState extends State<RideScreen> {
                 borderRadius: BorderRadius.circular(16),
               ),
               child: const Icon(Icons.my_location, color: Colors.white, size: 26),
-            ),
-          ),
-          const SizedBox(height: 10),
-          GestureDetector(
-            onTap: () => setState(() => _mapFullscreen = !_mapFullscreen),
-            child: Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.75),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Icon(
-                _mapFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                color: Colors.white,
-                size: 26,
-              ),
             ),
           ),
           const SizedBox(height: 10),
@@ -3704,7 +3741,7 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 
@@ -3737,7 +3774,7 @@ class _RideScreenState extends State<RideScreen> {
                   Icon(Icons.keyboard_arrow_up, color: Colors.white54, size: 14),
                   SizedBox(width: 4),
                   Text(
-                    'Détails',
+                    'Voir les détails',
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.white60,
@@ -3877,7 +3914,7 @@ class _RideScreenState extends State<RideScreen> {
     return Positioned(
       top: topOffset,
       left: 12,
-      child: Column(
+      child: _dragFade(Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── Repère (actif) ──────────────────────────────────────
@@ -3956,112 +3993,199 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
         ],
+      )),
+    );
+  }
+
+  Map<String, dynamic> _getLivePanelData() {
+    final altPoints = _pointsWithAlt
+        .map((p) => (p['alt'] as num?)?.toDouble())
+        .whereType<double>()
+        .toList();
+    return {
+      'rideIsPaused': rideIsPaused,
+      'rideName': _rideStatusTitle(),
+      'rideNote': _rideNote,
+      'pauseStartTime': _pauseStartTime,
+      'rideStartTime': rideStartTime,
+      'rideDuration': rideDuration,
+      'totalDistance': totalDistance,
+      'currentSpeedKmh': _speedKmh,
+      'latitude': latitude,
+      'longitude': longitude,
+      'altitude': altitude,
+      'safetyUrl': safetyUrl,
+      'dPlus': _dPlus,
+      'dMinus': _dMinus,
+      'altStart': _altStart,
+      'altMin': _altMin.isFinite ? _altMin : null,
+      'altMax': _altMax.isFinite ? _altMax : null,
+      'avgSpeedKmh': _avgSpeedKmh,
+      'maxSpeedKmh': _maxSpeedKmh,
+      'movingTime': _movingTime,
+      'speedPoints': List<double>.from(_speedPoints),
+      'altPoints': altPoints,
+      'weatherTemp': _weatherTemp,
+      'weatherDesc': _weatherDesc,
+      'weatherWind': _weatherWind,
+      'weatherWindDir': _weatherWindDir,
+      'weatherHumidity': _weatherHumidity,
+      'sunriseTime': _sunriseTime,
+      'sunsetTime': _sunsetTime,
+      'isNight': _isNight,
+      'gpsLabel': rideIsPaused ? _gpsLabelBeforePause : _gpsSignalLabel(),
+      'gpsColor': rideIsPaused ? _gpsColorBeforePause : _gpsSignalColor(),
+      'lastGpsUpdateTime': _lastGpsUpdateTime,
+      'notificationCount': _notificationCount,
+    };
+  }
+
+  void _showRideCockpitSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _PauseSheetWidget(
+        liveGetter: _getLivePanelData,
+        onEditTitle: () => _showEditModal(focusNote: false),
+        onEditNote: () => _showEditModal(focusNote: true),
+        onCopy: () {
+          final lat = double.tryParse(latitude);
+          final lng = double.tryParse(longitude);
+          if (lat != null && lng != null) {
+            Clipboard.setData(ClipboardData(
+              text: '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}',
+            ));
+          }
+        },
+        onOpen: () async {
+          if (safetyUrl != null) {
+            final uri = Uri.parse(safetyUrl!);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          }
+        },
       ),
     );
   }
 
   void _showDetailSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => DraggableScrollableSheet(
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
-        minChildSize: 0.35,
-        expand: false,
-        builder: (ctx, scrollController) => Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF0D0D0D),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: CustomScrollView(
-            controller: scrollController,
-            slivers: [
-              SliverToBoxAdapter(
-                child: Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    margin: const EdgeInsets.symmetric(vertical: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-              ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                  child: _buildNotificationZone(),
-                ),
-              ),
-              SliverReorderableList(
-                itemCount: _blockIds.length,
-                onReorder: _onBlockReorder,
-                itemBuilder: (context, index) {
-                  final id = _blockIds[index];
-                  if (id == 'sun' || id == 'dist') {
-                    return SizedBox.shrink(key: ValueKey(id));
-                  }
-                  Widget child;
-                  if (id == 'weather') {
-                    final sunIdx = _blockIds.indexOf('sun');
-                    final first = sunIdx < index ? 'sun' : 'weather';
-                    final second = sunIdx < index ? 'weather' : 'sun';
-                    child = Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: _buildBlockById(first, index: index)),
-                          const SizedBox(width: 6),
-                          Expanded(child: _buildBlockById(second, index: index)),
-                        ],
-                      ),
-                    );
-                  } else if (id == 'duree') {
-                    final distIdx = _blockIds.indexOf('dist');
-                    final first = distIdx < index ? 'dist' : 'duree';
-                    final second = distIdx < index ? 'duree' : 'dist';
-                    child = Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: _buildBlockById(first, index: index)),
-                          const SizedBox(width: 6),
-                          Expanded(child: _buildBlockById(second, index: index)),
-                        ],
-                      ),
-                    );
-                  } else {
-                    child = Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                      child: _buildBlockById(id, index: index),
-                    );
-                  }
-                  return Material(
-                    key: ValueKey(id),
-                    color: Colors.transparent,
-                    child: child,
-                  );
-                },
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 40)),
-            ],
+    _showRideCockpitSheet();
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // TOP BAR FLOTTANTE
+  // ═══════════════════════════════════════════════════════════════
+  String _rideStatusSubtitleFull() {
+    if (!rideIsStarted) return 'Prêt à démarrer';
+    final start = rideStartTime;
+    final t = start != null
+        ? '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}'
+        : '--:--';
+    if (rideIsPaused) return 'En pause · démarré à $t';
+    return 'En cours · depuis $t';
+  }
+
+  Widget _floatingTopBtn({required VoidCallback onTap, required Widget child, double width = 44}) =>
+    GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(15),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            width: width,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.52),
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+            ),
+            child: Center(child: child),
           ),
         ),
       ),
     );
-  }
+
+  Widget _buildFloatingTopBar() => SizedBox(
+    height: 54,
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _floatingTopBtn(
+          onTap: handleBackPressed,
+          child: const Icon(Icons.arrow_back, size: 20, color: Colors.white),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: GestureDetector(
+            onTap: () => _showEditModal(),
+            behavior: HitTestBehavior.opaque,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.52),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        gpsIsInitializing ? 'Initialisation GPS…' : _rideStatusTitle(),
+                        style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white,
+                          letterSpacing: -0.4,
+                          decoration: TextDecoration.none,
+                        ),
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                      ),
+                      if (!gpsIsInitializing) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                color: _rideStatusColor(), shape: BoxShape.circle),
+                            ),
+                            const SizedBox(width: 5),
+                            Flexible(
+                              child: Text(
+                                _rideStatusSubtitleFull(),
+                                style: TextStyle(
+                                  fontSize: 12, color: _rideStatusColor(),
+                                  decoration: TextDecoration.none,
+                                ),
+                                maxLines: 1, overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   // ═══════════════════════════════════════════════════════════════
   // BUILD
   // ═══════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
+    final safeTop = MediaQuery.of(context).padding.top;
     return WillPopScope(
       onWillPop: () async {
         await handleBackPressed();
@@ -4070,91 +4194,7 @@ class _RideScreenState extends State<RideScreen> {
       child: Stack(
         children: [
           Scaffold(
-            backgroundColor: const Color(0xFF0D0D0D),
-            appBar: PreferredSize(
-              preferredSize: Size.fromHeight(80 + MediaQuery.of(context).padding.top),
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 8, 12, 4),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      GestureDetector(
-                        onTap: handleBackPressed,
-                        child: Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1E1E1E),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(Icons.arrow_back, size: 20, color: Colors.white),
-                        ),
-                      ),
-                      if (!gpsIsInitializing) ...[
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: _showEditModal,
-                            behavior: HitTestBehavior.opaque,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  _rideStatusTitle(),
-                                  style: const TextStyle(
-                                    fontSize: 17,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.white,
-                                    height: 1.3,
-                                  ),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(height: 2),
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 7,
-                                      height: 7,
-                                      decoration: BoxDecoration(
-                                        color: _rideStatusColor(),
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 5),
-                                    Text(
-                                      _rideStatusSubtitle(),
-                                      style: TextStyle(fontSize: 12, color: _rideStatusColor()),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: _showEditModal,
-                          child: Container(
-                            width: 40,
-                            height: 40,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1E1E1E),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Icon(Icons.edit_outlined, size: 20, color: Colors.white),
-                          ),
-                        ),
-                      ] else
-                        const Spacer(),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+            backgroundColor: Colors.black,
 
             body: gpsIsInitializing
                 ? const Center(
@@ -4356,7 +4396,8 @@ class _RideScreenState extends State<RideScreen> {
                   ] else ...[
                     // Ride en cours : cockpit plein écran
                     _buildCockpitMapButtons(
-                      topOffset: MediaQuery.of(context).padding.top + 92,
+                      topOffset: _cockpitButtonsTop(
+                          true, MediaQuery.of(context).padding.top),
                     ),
                     ..._buildBannerDropZones(
                       fullscreen: true,
@@ -4373,13 +4414,42 @@ class _RideScreenState extends State<RideScreen> {
                       child: _buildCockpitControls(),
                     ),
                     _buildWaypointFloatingBtn(
-                      topOffset: MediaQuery.of(context).padding.top + 92,
+                      topOffset: _cockpitButtonsTop(
+                          true, MediaQuery.of(context).padding.top),
                     ),
                   ],
                 ],
               ),
             ),
           ),
+
+          // ── Top bar flottante (masquée seulement pendant le ride en plein écran) ──
+          if (!_mapFullscreen || !rideIsStarted) ...[
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: Container(
+                height: safeTop + 100,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.72),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: safeTop + 12,
+              left: 16, right: 16,
+              child: Material(
+                type: MaterialType.transparency,
+                child: _buildFloatingTopBar(),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -4436,4 +4506,992 @@ class _SaveProgressDialog extends StatelessWidget {
       ),
     );
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PAUSE COCKPIT SHEET
+// ════════════════════════════════════════════════════════════════════════════
+
+class _PauseSheetWidget extends StatefulWidget {
+  final Map<String, dynamic> Function() liveGetter;
+  final VoidCallback onCopy;
+  final VoidCallback onOpen;
+  final VoidCallback onEditTitle;
+  final VoidCallback onEditNote;
+
+  const _PauseSheetWidget({
+    required this.liveGetter,
+    required this.onCopy,
+    required this.onOpen,
+    required this.onEditTitle,
+    required this.onEditNote,
+  });
+
+  @override
+  State<_PauseSheetWidget> createState() => _PauseSheetWidgetState();
+}
+
+class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
+  Timer? _timer;
+  Duration _pauseDuration = Duration.zero;
+  late Map<String, dynamic> _live;
+
+  static const double _minSize = 0.35;
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+
+  @override
+  void initState() {
+    super.initState();
+    _live = widget.liveGetter();
+    _tick();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  // Replie le panneau à sa taille minimale (tap sur « Réduire les détails »).
+  void _reduceSheet() {
+    if (!_sheetController.isAttached) return;
+    _sheetController.animateTo(
+      _minSize,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _tick() {
+    if (!mounted) return;
+    setState(() {
+      _live = widget.liveGetter();
+      final pauseStart = _live['pauseStartTime'] as DateTime?;
+      _pauseDuration = pauseStart != null
+          ? DateTime.now().difference(pauseStart)
+          : Duration.zero;
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _sheetController.dispose();
+    super.dispose();
+  }
+
+  String _fmtDur(Duration d) {
+    final h = d.inHours.toString().padLeft(2, '0');
+    final m = (d.inMinutes % 60).toString().padLeft(2, '0');
+    final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$h:$m:$s';
+  }
+
+  String _fmtTime(DateTime? dt) {
+    if (dt == null) return '--:--';
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _fmtAgo(DateTime? dt) {
+    if (dt == null) return '--';
+    final diff = DateTime.now().difference(dt).inSeconds;
+    if (diff < 60) return 'il y a ${diff} sec';
+    final m = diff ~/ 60;
+    return 'il y a ${m} min';
+  }
+
+  String _fmtDist(double meters) {
+    if (meters < 1000) return '${meters.toStringAsFixed(0)} m';
+    return '${(meters / 1000).toStringAsFixed(2)} km';
+  }
+
+  String _fmtCompact(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    if (h > 0) return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  // ── Card shell ────────────────────────────────────────────────────────────
+  Widget _card({required Widget child, EdgeInsets? padding}) => Container(
+    padding: padding ?? const EdgeInsets.fromLTRB(14, 14, 14, 14),
+    decoration: BoxDecoration(
+      color: const Color(0xFF131313),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+    ),
+    child: child,
+  );
+
+  Widget _cardTitle(IconData icon, Color color, String label) => Row(
+    children: [
+      Icon(icon, size: 14, color: color),
+      const SizedBox(width: 7),
+      Text(label, style: const TextStyle(
+        fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white,
+      )),
+    ],
+  );
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  Widget _statusPill({
+    required IconData icon,
+    required String label,
+    required Color color,
+  }) =>
+    Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 11),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+
+  // Bouton « ﹀ Réduire » sur la ligne du titre → replie le panneau.
+  Widget _reducePill() => GestureDetector(
+        onTap: _reduceSheet,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E1E20),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.keyboard_arrow_down, color: Colors.white54, size: 15),
+              SizedBox(width: 3),
+              Text(
+                'Réduire',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _buildHeader() {
+    final isPaused = _live['rideIsPaused'] as bool;
+    final rideColor = isPaused ? const Color(0xFFfb923c) : const Color(0xFF4ade80);
+    final rideIcon = isPaused ? Icons.pause_circle_outline : Icons.navigation_outlined;
+    final rideLabel = isPaused ? 'En pause' : 'En cours';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: widget.onEditTitle,
+                  child: Text(
+                    _live['rideName'] as String,
+                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _reducePill(),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Démarrée à ${_fmtTime(_live['rideStartTime'] as DateTime?)}',
+            style: const TextStyle(fontSize: 13, color: Colors.white54),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              _statusPill(icon: rideIcon, label: rideLabel, color: rideColor),
+              const SizedBox(width: 8),
+              _statusPill(
+                icon: Icons.signal_cellular_alt,
+                label: 'GPS ${_live['gpsLabel'] as String}',
+                color: _live['gpsColor'] as Color,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Résumé card ───────────────────────────────────────────────────────────
+  Widget _statCell(IconData icon, Color color, String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    child: Row(
+      children: [
+        Icon(icon, size: 13, color: color),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: const TextStyle(fontSize: 10, color: Colors.white38)),
+              const SizedBox(height: 2),
+              Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color)),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildResumeCard() {
+    final isPaused = _live['rideIsPaused'] as bool;
+    final sep = Container(height: 1, color: Colors.white.withValues(alpha: 0.06));
+    final vsep = Container(width: 1, color: Colors.white.withValues(alpha: 0.06));
+    return _card(
+      padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+            child: _cardTitle(Icons.trending_up, const Color(0xFF4ade80), 'Résumé'),
+          ),
+          sep,
+          IntrinsicHeight(
+            child: Row(
+              children: [
+                Expanded(child: _statCell(Icons.timer_outlined, const Color(0xFF4ade80), 'Durée totale', _fmtDur(_live['rideDuration'] as Duration))),
+                vsep,
+                Expanded(child: _statCell(Icons.route_outlined, const Color(0xFFfb923c), 'Distance', _fmtDist(_live['totalDistance'] as double))),
+              ],
+            ),
+          ),
+          sep,
+          IntrinsicHeight(
+            child: Row(
+              children: [
+                Expanded(child: _statCell(Icons.update, const Color(0xFF60a5fa), 'Dernière MAJ GPS', _fmtAgo(_live['lastGpsUpdateTime'] as DateTime?))),
+                vsep,
+                if (isPaused)
+                  Expanded(child: _statCell(Icons.pause_circle_outline, const Color(0xFFa78bfa), 'Pause actuelle', _fmtDur(_pauseDuration)))
+                else
+                  Expanded(child: _statCell(Icons.speed_outlined, const Color(0xFFa78bfa), 'Vitesse actuelle', '${(_live['currentSpeedKmh'] as double).toStringAsFixed(1)} km/h')),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Position & suivi card ─────────────────────────────────────────────────
+  Widget _buildPositionCard() {
+    final lat = double.tryParse(_live['latitude'] as String);
+    final lng = double.tryParse(_live['longitude'] as String);
+    final latStr = lat != null ? '${lat.toStringAsFixed(4)}° N' : '--';
+    final lngStr = lng != null ? '${lng.toStringAsFixed(4)}°' : '--';
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(Icons.location_on_outlined, Colors.blue, 'Position & suivi'),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Dernière position connue',
+                      style: TextStyle(fontSize: 11, color: Colors.white38)),
+                    const SizedBox(height: 4),
+                    Text('$latStr · $lngStr',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
+                    const SizedBox(height: 2),
+                    Text('Altitude : ${_live['altitude'] as String} m',
+                      style: const TextStyle(fontSize: 12, color: Colors.white54)),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Container(width: 7, height: 7,
+                        decoration: const BoxDecoration(color: Color(0xFF4ade80), shape: BoxShape.circle)),
+                      const SizedBox(width: 5),
+                      Flexible(child: Text(
+                        'Lien de suivi actif · Dernière MAJ ${_fmtAgo(_live['lastGpsUpdateTime'] as DateTime?)}',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFF4ade80)),
+                      )),
+                    ]),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _actionBtn(Icons.copy_outlined, 'Copier', Colors.blue, widget.onCopy),
+                  const SizedBox(height: 8),
+                  _actionBtn(Icons.open_in_new, 'Ouvrir', Colors.blue, widget.onOpen),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionBtn(IconData icon, String label, Color color, VoidCallback onTap) =>
+    GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: 0.30)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    );
+
+  // ── Dénivelé card ─────────────────────────────────────────────────────────
+  Widget _buildDeniveleCard() {
+    final altPoints = _live['altPoints'] as List<double>;
+    final altStart = _live['altStart'] as double?;
+    final altMin = _live['altMin'] as double?;
+    final altMax = _live['altMax'] as double?;
+    final dPlus = _live['dPlus'] as double;
+    final dMinus = _live['dMinus'] as double;
+    final hasChart = altPoints.length >= 2;
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(Icons.trending_up, const Color(0xFFfb923c), 'Dénivelé'),
+          const SizedBox(height: 14),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 160,
+                  child: hasChart
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: ColoredBox(
+                          color: const Color(0xFF111111),
+                          child: CustomPaint(
+                            painter: _LiveAltPainter(
+                              altPoints,
+                              altStart: altStart,
+                              altMin: altMin,
+                              altMax: altMax,
+                            ),
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                      )
+                    : Center(
+                        child: Text('Pas encore de données altitude',
+                          style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.30))),
+                      ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _elevKpi('+${dPlus.toStringAsFixed(0)} m', 'D+', const Color(0xFFfb923c)),
+                  const SizedBox(height: 20),
+                  _elevKpi('−${dMinus.toStringAsFixed(0)} m', 'D−', const Color(0xFFa78bfa)),
+                ],
+              ),
+            ],
+          ),
+          if (altStart != null || altMin != null || altMax != null) ...[
+            const SizedBox(height: 10),
+            Row(children: [
+              if (altStart != null) _altBadge('DÉPART', '${altStart.toStringAsFixed(0)} m', Colors.white54),
+              if (altMin != null) ...[const SizedBox(width: 8), _altBadge('ALT MIN', '${altMin.toStringAsFixed(0)} m', const Color(0xFF60a5fa))],
+              if (altMax != null) ...[const SizedBox(width: 8), _altBadge('ALT MAX', '${altMax.toStringAsFixed(0)} m', const Color(0xFFfb923c))],
+            ]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _elevKpi(String value, String label, Color color) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: color, letterSpacing: -0.5)),
+      const SizedBox(height: 2),
+      Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF666666))),
+    ],
+  );
+
+  Widget _altBadge(String label, String value, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.10),
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: color.withValues(alpha: 0.25)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 9, color: color.withValues(alpha: 0.7), letterSpacing: 0.5)),
+        Text(value, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color)),
+      ],
+    ),
+  );
+
+  // ── Vitesse card ──────────────────────────────────────────────────────────
+  Widget _buildVitesseCard() {
+    final speedPoints = _live['speedPoints'] as List<double>;
+    final movingSec = (_live['movingTime'] as Duration).inSeconds;
+    final totalSec = (_live['rideDuration'] as Duration).inSeconds;
+    final stopSec = (totalSec - movingSec).clamp(0, totalSec);
+    final hasChart = speedPoints.length >= 2;
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(Icons.speed_outlined, const Color(0xFF60a5fa), 'Vitesse'),
+          const SizedBox(height: 14),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('VITESSE MOYENNE',
+                    style: TextStyle(fontSize: 10, color: Color(0xFF666666), letterSpacing: 0.5)),
+                  const SizedBox(height: 6),
+                  Text('${(_live['avgSpeedKmh'] as double).toStringAsFixed(1)} km/h',
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800,
+                      color: Color(0xFF60a5fa), letterSpacing: -1)),
+                ],
+              ),
+              const SizedBox(width: 14),
+              if (hasChart)
+                Expanded(
+                  child: SizedBox(
+                    height: 100,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: CustomPaint(
+                        painter: _LiveSpeedPainter(speedPoints, _live['maxSpeedKmh'] as double),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (totalSec > 0) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: Row(children: [
+                Expanded(
+                  flex: movingSec.clamp(1, totalSec),
+                  child: Container(height: 5, color: const Color(0xFF60a5fa)),
+                ),
+                if (stopSec > 0)
+                  Expanded(
+                    flex: stopSec,
+                    child: Container(height: 5, color: const Color(0xFF252525)),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 8),
+          ],
+          Row(children: [
+            Text(_fmtCompact(movingSec),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF60a5fa))),
+            const SizedBox(width: 5),
+            const Text('en mouvement', style: TextStyle(fontSize: 12, color: Color(0xFF8899aa))),
+            const SizedBox(width: 10),
+            Container(width: 1, height: 14, color: const Color(0xFF444444)),
+            const SizedBox(width: 10),
+            Text(_fmtCompact(stopSec),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFaabbcc))),
+            const SizedBox(width: 5),
+            const Text('arrêté', style: TextStyle(fontSize: 12, color: Color(0xFF8899aa))),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  // ── Conditions card ───────────────────────────────────────────────────────
+  Widget _buildConditionsCard() {
+    final isNight = _live['isNight'] as bool;
+    final weatherTemp = _live['weatherTemp'] as double?;
+    final sunriseTime = _live['sunriseTime'] as DateTime?;
+    final sunsetTime = _live['sunsetTime'] as DateTime?;
+    final hasWeather = weatherTemp != null;
+    final hasSun = sunriseTime != null && sunsetTime != null;
+    if (!hasWeather && !hasSun) return const SizedBox.shrink();
+
+    final accentWeather = isNight ? const Color(0xFF818cf8) : const Color(0xFFF9A825);
+    final accentSun = isNight ? const Color(0xFF818cf8) : const Color(0xFFfbbf24);
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(Icons.wb_sunny_outlined, accentWeather, 'Conditions'),
+          const SizedBox(height: 12),
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (hasWeather) Expanded(child: _weatherCol(accentWeather)),
+                if (hasWeather && hasSun)
+                  Container(width: 1, color: Colors.white.withValues(alpha: 0.08),
+                    margin: const EdgeInsets.symmetric(horizontal: 12)),
+                if (hasSun) Expanded(child: _sunCol(accentSun)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _weatherCol(Color accent) {
+    final weatherTemp = _live['weatherTemp'] as double?;
+    final weatherDesc = _live['weatherDesc'] as String?;
+    final weatherWind = _live['weatherWind'] as double?;
+    final weatherWindDir = _live['weatherWindDir'] as String?;
+    final weatherHumidity = _live['weatherHumidity'] as int?;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${weatherTemp!.toStringAsFixed(0)}°',
+          style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700, color: accent),
+        ),
+        if (weatherDesc != null) ...[
+          const SizedBox(height: 3),
+          Text(weatherDesc, style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+        ],
+        const SizedBox(height: 6),
+        if (weatherWind != null)
+          _condRow(Icons.air, '${weatherWind.toStringAsFixed(0)} km/h ${weatherWindDir ?? ''}'),
+        if (weatherHumidity != null)
+          _condRow(Icons.water_drop_outlined, 'Humidité $weatherHumidity%'),
+      ],
+    );
+  }
+
+  Widget _sunCol(Color accent) {
+    final isNight = _live['isNight'] as bool;
+    final sunriseTime = _live['sunriseTime'] as DateTime?;
+    final sunsetTime = _live['sunsetTime'] as DateTime?;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Icon(isNight ? Icons.nights_stay_outlined : Icons.wb_sunny, color: accent, size: 18),
+          const SizedBox(width: 6),
+          Text(isNight ? 'Nuit' : 'Soleil',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: accent)),
+        ]),
+        const SizedBox(height: 10),
+        _sunRow(Icons.wb_twilight, 'Lever', _fmtTime(sunriseTime), const Color(0xFFffa726)),
+        const SizedBox(height: 6),
+        _sunRow(Icons.nights_stay_outlined, 'Coucher', _fmtTime(sunsetTime), const Color(0xFF818cf8)),
+      ],
+    );
+  }
+
+  Widget _condRow(IconData icon, String text) => Padding(
+    padding: const EdgeInsets.only(top: 4),
+    child: Row(children: [
+      Icon(icon, size: 12, color: Colors.white38),
+      const SizedBox(width: 5),
+      Flexible(child: Text(text, style: const TextStyle(fontSize: 11, color: Color(0xFF888888)))),
+    ]),
+  );
+
+  Widget _sunRow(IconData icon, String label, String value, Color color) => Row(children: [
+    Icon(icon, size: 13, color: color),
+    const SizedBox(width: 6),
+    Text('$label ', style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+    Text(value, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+  ]);
+
+  // ── Note card ─────────────────────────────────────────────────────────────
+  Widget _buildNoteCard() {
+    final rideNote = _live['rideNote'] as String;
+    final hasNote = rideNote.isNotEmpty;
+    return GestureDetector(
+      onTap: widget.onEditNote,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF131313),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: hasNote
+                ? Colors.white.withValues(alpha: 0.07)
+                : const Color(0xFF2563eb).withValues(alpha: 0.22),
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              hasNote ? Icons.notes : Icons.add_circle_outline_rounded,
+              color: hasNote ? Colors.white38 : const Color(0xFF60a5fa),
+              size: 18,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: hasNote
+                  ? Text(
+                      rideNote,
+                      style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.45),
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                    )
+                  : const Text(
+                      'Ajouter une note à cette sortie…',
+                      style: TextStyle(
+                        color: Color(0xFF4d6080),
+                        fontSize: 14,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAlertesCard() {
+    final hasAlerts = (_live['notificationCount'] as int) > 0;
+    final alertColor = hasAlerts ? Colors.orange : Colors.white38;
+    return _card(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Row(
+        children: [
+          Container(
+            width: 34, height: 34,
+            decoration: BoxDecoration(
+              color: alertColor.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+              hasAlerts ? Icons.notifications_active : Icons.notifications_none,
+              color: alertColor, size: 17,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Alertes',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: hasAlerts ? Colors.white : Colors.white54)),
+                const SizedBox(height: 2),
+                Text(
+                  hasAlerts
+                    ? '${(_live['notificationCount'] as int)} alerte(s) active(s)'
+                    : 'Aucune alerte pour le moment',
+                  style: const TextStyle(fontSize: 11, color: Colors.white38),
+                ),
+                const Text(
+                  'Les dangers proches, alertes météo et notifications importantes apparaîtront ici.',
+                  style: TextStyle(fontSize: 10, color: Colors.white24),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      controller: _sheetController,
+      initialChildSize: 0.78,
+      maxChildSize: 0.95,
+      minChildSize: _minSize,
+      expand: false,
+      builder: (ctx, scrollController) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF0D0D0D),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: CustomScrollView(
+          controller: scrollController,
+          slivers: [
+            // En-tête épinglé : barre de drag + pastille « Réduire les détails »
+            const SliverPersistentHeader(
+              pinned: true,
+              delegate: _SheetTopBarDelegate(),
+            ),
+            SliverToBoxAdapter(child: _buildHeader()),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildResumeCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildPositionCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildDeniveleCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildVitesseCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildConditionsCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildNoteCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildAlertesCard(),
+            )),
+            const SliverToBoxAdapter(child: SizedBox(height: 40)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// EN-TÊTE ÉPINGLÉ du panneau détails : barre de drag + « Réduire les détails »
+// ════════════════════════════════════════════════════════════════════════════
+class _SheetTopBarDelegate extends SliverPersistentHeaderDelegate {
+  const _SheetTopBarDelegate();
+
+  static const double _height = 26;
+
+  @override
+  double get minExtent => _height;
+  @override
+  double get maxExtent => _height;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      child: Container(
+        color: const Color(0xFF0D0D0D),
+        alignment: Alignment.center,
+        // Barre de drag centrée, sur sa propre ligne (agrandir/réduire au doigt)
+        child: Container(
+          width: 36,
+          height: 4,
+          decoration: BoxDecoration(
+            color: Colors.white24,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _SheetTopBarDelegate oldDelegate) => false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PAINTER : profil altimétrique live
+// ════════════════════════════════════════════════════════════════════════════
+class _LiveAltPainter extends CustomPainter {
+  final List<double> alts;
+  final double? altStart;
+  final double? altMin;
+  final double? altMax;
+
+  const _LiveAltPainter(this.alts, {this.altStart, this.altMin, this.altMax});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (alts.length < 2) return;
+
+    final minA = alts.reduce(min);
+    final maxA = alts.reduce(max);
+    final range = (maxA - minA).clamp(1.0, double.infinity);
+
+    const topPad = 16.0;
+    const botPad = 16.0;
+    final drawH = size.height - topPad - botPad;
+
+    double xOf(int i) => i / (alts.length - 1) * size.width;
+    double yOf(double a) => topPad + drawH - ((a - minA) / range) * drawH;
+
+    final linePath = ui.Path()..moveTo(xOf(0), yOf(alts[0]));
+    for (int i = 1; i < alts.length; i++) { linePath.lineTo(xOf(i), yOf(alts[i])); }
+
+    canvas.drawPath(
+      ui.Path.from(linePath)
+        ..lineTo(size.width, size.height)
+        ..lineTo(0, size.height)
+        ..close(),
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(0, topPad), Offset(0, size.height),
+          [const Color(0xFFfb923c).withValues(alpha: 0.38),
+           const Color(0xFFfb923c).withValues(alpha: 0.01)],
+        )
+        ..style = PaintingStyle.fill,
+    );
+
+    canvas.drawPath(linePath, Paint()
+      ..color = const Color(0xFFfb923c)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round);
+  }
+
+  @override
+  bool shouldRepaint(_LiveAltPainter old) =>
+    old.alts != alts || old.altStart != altStart || old.altMin != altMin || old.altMax != altMax;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PAINTER : profil vitesse live
+// ════════════════════════════════════════════════════════════════════════════
+class _LiveSpeedPainter extends CustomPainter {
+  final List<double> speeds;
+  final double maxSpeed;
+
+  const _LiveSpeedPainter(this.speeds, this.maxSpeed);
+
+  List<double> _smooth(List<double> data) {
+    const w = 5;
+    final out = <double>[];
+    for (int i = 0; i < data.length; i++) {
+      final lo = (i - w ~/ 2).clamp(0, data.length - 1);
+      final hi = (i + w ~/ 2).clamp(0, data.length - 1);
+      double sum = 0;
+      for (int j = lo; j <= hi; j++) { sum += data[j]; }
+      out.add(sum / (hi - lo + 1));
+    }
+    return out;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (speeds.length < 2) return;
+
+    final smoothed = _smooth(speeds);
+    final peak = smoothed.reduce(max).clamp(1.0, 300.0);
+
+    const topPad = 40.0;
+    const botPad = 4.0;
+    final drawH = size.height - topPad - botPad;
+
+    double xOf(int i) => i / (smoothed.length - 1) * size.width;
+    double yOf(double s) => topPad + drawH - (s / peak) * drawH;
+
+    final fillPath = ui.Path()..moveTo(xOf(0), yOf(smoothed[0]));
+    for (int i = 1; i < smoothed.length; i++) { fillPath.lineTo(xOf(i), yOf(smoothed[i])); }
+    fillPath..lineTo(size.width, size.height)..lineTo(0, size.height)..close();
+
+    canvas.drawPath(fillPath, Paint()
+      ..shader = ui.Gradient.linear(
+        Offset(0, topPad), Offset(0, size.height),
+        [const Color(0xFF60a5fa).withValues(alpha: 0.18),
+         const Color(0xFF60a5fa).withValues(alpha: 0.01)],
+      )
+      ..style = PaintingStyle.fill);
+
+    final linePath = ui.Path()..moveTo(xOf(0), yOf(smoothed[0]));
+    for (int i = 1; i < smoothed.length; i++) { linePath.lineTo(xOf(i), yOf(smoothed[i])); }
+    canvas.drawPath(linePath, Paint()
+      ..color = const Color(0xFF60a5fa)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round);
+
+    // Badge MAX
+    int maxIdx = 0;
+    for (int i = 1; i < smoothed.length; i++) {
+      if (smoothed[i] > smoothed[maxIdx]) maxIdx = i;
+    }
+    final px = xOf(maxIdx);
+    final py = yOf(smoothed[maxIdx]);
+
+    final valStr = '${maxSpeed.toStringAsFixed(1)} km/h';
+    final tpLabel = TextPainter(
+      text: const TextSpan(text: 'MAX',
+        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Color(0xFFbfdbfe), letterSpacing: 1.0)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final tpVal = TextPainter(
+      text: TextSpan(text: valStr,
+        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.white)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const hP = 8.0; const vP = 5.0; const gap = 2.0;
+    final bw = max(tpLabel.width, tpVal.width) + hP * 2;
+    final bh = tpLabel.height + gap + tpVal.height + vP * 2;
+    const by = 2.0;
+    final bx = (px - bw / 2).clamp(2.0, size.width - bw - 2);
+
+    canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(bx, by, bw, bh), const Radius.circular(7)),
+      Paint()..color = const Color(0xFF1e3a8a));
+    canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(bx, by, bw, bh), const Radius.circular(7)),
+      Paint()..color = const Color(0xFF60a5fa)..style = PaintingStyle.stroke..strokeWidth = 1.1);
+
+    tpLabel.paint(canvas, Offset(bx + (bw - tpLabel.width) / 2, by + vP));
+    tpVal.paint(canvas, Offset(bx + (bw - tpVal.width) / 2, by + vP + tpLabel.height + gap));
+
+    final connY1 = by + bh + 1;
+    final connY2 = py - 4;
+    if (connY2 > connY1) {
+      canvas.drawLine(Offset(px, connY1), Offset(px, connY2),
+        Paint()..color = const Color(0xFF60a5fa).withValues(alpha: 0.6)..strokeWidth = 1.0);
+    }
+    canvas.drawCircle(Offset(px, py), 4.0, Paint()..color = const Color(0xFF1e3a8a));
+    canvas.drawCircle(Offset(px, py), 4.0, Paint()
+      ..color = const Color(0xFF93c5fd)..style = PaintingStyle.stroke..strokeWidth = 1.6);
+  }
+
+  @override
+  bool shouldRepaint(_LiveSpeedPainter old) => old.speeds != speeds || old.maxSpeed != maxSpeed;
 }

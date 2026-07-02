@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:sunday_tracker/widgets/ride_share_card.dart';
+import 'package:sunday_tracker/utils/date_labels.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -45,9 +46,12 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   ];
 
   // ── Sheet glissant ───────────────────────────────────────────────────────────
-  static const double _kReducedSize  = 0.17;
-  static const double _kExpandedSize = 0.90;
+  static const double _kMinSize     = 0.20;
+  static const double _kInitialSize = 0.95;
+  static const double _kMaxSize     = 0.95;
+  static const double _kFloorSize   = 0.01;
   late DraggableScrollableController _sheetController;
+  bool _isClosing = false;
 
   // ════════════════════════════════════════════════════════════════════════════
   // LIFECYCLE
@@ -68,7 +72,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       if (_ridePoints.isEmpty) return;
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
-      _fitToRoute(panelFraction: _kReducedSize);
+      _fitToRoute(panelFraction: _kMinSize);
     });
   }
 
@@ -84,7 +88,13 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
 
   void _onPanelChanged() {
     if (_recentering && _sheetController.isAttached) {
-      _fitToRoute(panelFraction: _sheetController.size);
+      _fitToRoute(panelFraction: _sheetController.size.clamp(_kMinSize, _kMaxSize));
+    }
+    if (_sheetController.isAttached && _sheetController.size < 0.10 && !_isClosing) {
+      _isClosing = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.pop(context);
+      });
     }
   }
 
@@ -93,7 +103,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     final screenH = MediaQuery.of(context).size.height;
     final safeTop = MediaQuery.of(context).padding.top;
     final fraction = panelFraction ??
-        (_sheetController.isAttached ? _sheetController.size : _kReducedSize);
+        (_sheetController.isAttached ? _sheetController.size : _kInitialSize);
     mapController.fitCamera(
       CameraFit.bounds(
         bounds: LatLngBounds.fromPoints(_ridePoints),
@@ -116,9 +126,8 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     if (startTime == null) return '';
     final dt = DateTime.tryParse(startTime)?.toLocal();
     if (dt == null) return '';
-    const days   = ['lundi','mardi','mercredi','jeudi','vendredi','samedi','dimanche'];
     const months = ['jan.','fév.','mars','avr.','mai','juin','juil.','août','sep.','oct.','nov.','déc.'];
-    final date = '${days[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    final date = '${kFrDaysShort[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
     final startH = '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
     final endTime = widget.ride['endTime'];
     final dtEnd = endTime != null ? DateTime.tryParse(endTime)?.toLocal() : null;
@@ -552,9 +561,9 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         initialCenter: ridePoints.isNotEmpty ? ridePoints.first : const LatLng(48.8566, 2.3522),
         initialZoom: 13,
         onTap: (tapPos, latLng) {
-          if (_sheetController.isAttached && _sheetController.size > _kReducedSize + 0.02) {
+          if (_sheetController.isAttached && _sheetController.size > _kMinSize + 0.02) {
             _sheetController.animateTo(
-              _kReducedSize,
+              _kMinSize,
               duration: const Duration(milliseconds: 320),
               curve: Curves.easeOut,
             );
@@ -766,46 +775,12 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     bool hasWeather,
     List<LatLng> ridePoints,
   ) {
+    const panelColor = Color(0xF2111416);
     const decoration = BoxDecoration(
-      color: Color(0xF2111416),
+      color: panelColor,
       borderRadius: BorderRadius.only(
         topLeft: Radius.circular(28),
         topRight: Radius.circular(28),
-      ),
-    );
-
-    final handleAndStrip = GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        if (!_sheetController.isAttached) return;
-        final target = _sheetController.size <= _kReducedSize + 0.02
-            ? _kExpandedSize
-            : _kReducedSize;
-        _sheetController.animateTo(
-          target,
-          duration: const Duration(milliseconds: 320),
-          curve: Curves.easeOut,
-        );
-      },
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Poignée
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Center(
-              child: Container(
-                width: 44, height: 5,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.38),
-                  borderRadius: BorderRadius.circular(99),
-                ),
-              ),
-            ),
-          ),
-          // Mini bande stats
-          _buildMiniStrip(),
-        ],
       ),
     );
 
@@ -836,22 +811,176 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       animation: _sheetController,
       builder: (context, child) {
         final isReduced = !_sheetController.isAttached ||
-            _sheetController.size < _kReducedSize + 0.04;
-        return Container(
-          decoration: decoration,
-          child: Column(
-            children: [
-              handleAndStrip,
-              // Toujours présent pour que le drag du sheet fonctionne,
-              // masqué visuellement en mode réduit.
-              Expanded(
+            _sheetController.size < _kMinSize + 0.05;
+
+        void toggle() {
+          if (!_sheetController.isAttached) return;
+          final target = isReduced ? _kInitialSize : _kMinSize;
+          _sheetController.animateTo(
+            target,
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOut,
+          );
+        }
+
+        // Pastille bascule (chevron animé + libellé), style cockpit.
+        // Réduit : ︿ « Voir les détails » · Étendu : ﹀ « Réduire ».
+        Widget buildPill() => GestureDetector(
+              onTap: toggle,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AnimatedRotation(
+                      turns: isReduced ? 0.0 : 0.5,
+                      duration: const Duration(milliseconds: 250),
+                      child: const Icon(Icons.keyboard_arrow_up,
+                          size: 16, color: Colors.white54),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      isReduced ? 'Voir les détails' : 'Réduire',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white70,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+
+        // Panneau sombre arrondi.
+        // - Réduit  : mini-bande seule (la pastille flotte au-dessus).
+        // - Étendu  : poignée + « Réduire » DANS le panneau (pas de collision
+        //   avec l'app bar) + mini-bande.
+        final darkTop = GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: toggle,
+          child: Container(
+            decoration: decoration,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isReduced)
+                  const SizedBox(height: 6)
+                else ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  // En-tête façon cockpit : titre + « ﹀ Réduire » sur la même
+                  // ligne, sous-titre (date) et statut « Terminée » (ride fini,
+                  // donc pas de chip GPS).
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                rideName,
+                                style: const TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                  letterSpacing: -0.3,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            buildPill(),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _formatDateSub(),
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.white54),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF4ade80)
+                                .withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.check_circle_outline,
+                                  size: 14, color: Color(0xFF4ade80)),
+                              SizedBox(width: 5),
+                              Text(
+                                'Terminée',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF4ade80),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                _buildMiniStrip(),
+                if (isReduced) const SizedBox(height: 6),
+              ],
+            ),
+          ),
+        );
+
+        return Column(
+          children: [
+            // Réduit : la pastille FLOTTE au-dessus du panneau (carte derrière).
+            if (isReduced)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Center(child: buildPill()),
+              ),
+            darkTop,
+            // Corps : sombre en mode étendu, transparent (carte visible) en réduit.
+            // Toujours présent pour que le drag du sheet fonctionne.
+            Expanded(
+              child: Container(
+                color: isReduced ? null : panelColor,
                 child: Opacity(
                   opacity: isReduced ? 0.0 : 1.0,
                   child: IgnorePointer(ignoring: isReduced, child: child!),
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         );
       },
       child: listView,
@@ -861,7 +990,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   // ── Mini bande stats ─────────────────────────────────────────────────────────
   Widget _buildMiniStrip() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 0),
       child: Container(
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.05),
@@ -882,7 +1011,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   Widget _miniStat(IconData icon, Color color, String value, String label) {
     return Expanded(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1541,11 +1670,11 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
               final screenH = MediaQuery.of(context).size.height;
               final panelSize = _sheetController.isAttached
                   ? _sheetController.size
-                  : _kReducedSize;
+                  : _kInitialSize;
               final panelH = screenH * panelSize;
               // Visible en réduit, disparaît quand le panneau monte vers plein écran
-              const fadeStart = _kReducedSize + 0.15;
-              const fadeEnd   = _kReducedSize + 0.30;
+              final fadeStart = _kMinSize + 0.15;
+              final fadeEnd   = _kMinSize + 0.30;
               final opacity = ((fadeEnd - panelSize) / (fadeEnd - fadeStart))
                   .clamp(0.0, 1.0);
               return Positioned(
@@ -1563,10 +1692,11 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
           // 5. Panneau glissant
           DraggableScrollableSheet(
             controller: _sheetController,
-            initialChildSize: _kReducedSize,
-            minChildSize: _kReducedSize,
-            maxChildSize: _kExpandedSize,
+            initialChildSize: _kMinSize,
+            minChildSize: _kFloorSize,
+            maxChildSize: _kMaxSize,
             snap: true,
+            snapSizes: const [_kMinSize, _kMaxSize],
             builder: (context, scrollController) => _buildSheetContent(
               scrollController,
               altProfile,

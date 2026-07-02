@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
+import '../utils/date_labels.dart';
 import '../widgets/ride_trace_thumbnail.dart';
 import '../widgets/ride_share_card.dart';
 
@@ -260,7 +261,6 @@ class _HomeScreenState extends State<HomeScreen> {
       int recovered = 0;
 
       const months = ['jan', 'fév', 'mar', 'avr', 'mai', 'juin', 'juil', 'aoû', 'sep', 'oct', 'nov', 'déc'];
-      const days = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
 
       for (final session in sessions) {
         final sessionId = session['id'];
@@ -339,7 +339,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final startLocal = start.toLocal();
         final hour = startLocal.hour;
         final moment = hour < 6 ? 'nuit' : hour < 12 ? 'matin' : hour < 14 ? 'midi' : hour < 18 ? 'après-midi' : hour < 21 ? 'soir' : 'nuit';
-        final autoName = 'Sortie du ${days[startLocal.weekday - 1]} ${startLocal.day} ${months[startLocal.month - 1]} ${startLocal.year} · $moment';
+        final autoName = 'Sortie du ${kFrDaysShort[startLocal.weekday - 1]} ${startLocal.day} ${months[startLocal.month - 1]} ${startLocal.year} · $moment';
 
         // Géolocalisation du premier point
         String city = '', department = '', region = '';
