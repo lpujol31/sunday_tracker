@@ -765,6 +765,32 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Badge neutre (charcoal) superposé à la miniature : icône + nombre.
+  // Couleur volontairement non connotée activité (ni orange, ni bleu).
+  Widget _thumbBadge(IconData icon, int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xE61E2227), // anthracite semi-opaque
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.white24, width: 0.8),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 11, color: Colors.white70),
+        const SizedBox(width: 3),
+        Text(
+          '$count',
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+            height: 1.0,
+          ),
+        ),
+      ]),
+    );
+  }
+
   Widget _rideMenuItem({
     required IconData icon,
     required Color iconColor,
@@ -1098,6 +1124,19 @@ class _HomeScreenState extends State<HomeScreen> {
                         ? ride['practice'] as String
                         : detectPractice(ride);
 
+                    // Compteurs de contenu enrichi (WP + photos) pour les badges.
+                    var wpCount = 0;
+                    var photoCount = 0;
+                    final wps = ride['waypoints'] as List?;
+                    if (wps != null) {
+                      wpCount = wps.length;
+                      for (final wp in wps) {
+                        if (wp is Map) {
+                          photoCount += (wp['photos'] as List?)?.length ?? 0;
+                        }
+                      }
+                    }
+
                     return Dismissible(
                       key: ValueKey(rideKey),
                       direction: DismissDirection.endToStart,
@@ -1223,8 +1262,24 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                     ),
                                     const SizedBox(width: 10),
-                                    // ── Miniature trace ──
-                                    RideTraceThumbnail(points: ride['points'] ?? []),
+                                    // ── Miniature trace + badges WP / photos ──
+                                    Stack(
+                                      children: [
+                                        RideTraceThumbnail(points: ride['points'] ?? []),
+                                        if (wpCount > 0)
+                                          Positioned(
+                                            top: 5,
+                                            left: 5,
+                                            child: _thumbBadge(Icons.place, wpCount),
+                                          ),
+                                        if (photoCount > 0)
+                                          Positioned(
+                                            bottom: 5,
+                                            left: 5,
+                                            child: _thumbBadge(Icons.photo_camera, photoCount),
+                                          ),
+                                      ],
+                                    ),
                                     const SizedBox(width: 12),
                                     // ── Titre + stats ──
                                     Expanded(
@@ -1311,9 +1366,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                           height: 36,
                                           decoration: BoxDecoration(
                                             shape: BoxShape.circle,
-                                            border: Border.all(color: const Color(0xFFFF8A00), width: 1.8),
+                                            color: const Color(0xFF232323),
+                                            border: Border.all(color: Colors.white24, width: 1),
                                           ),
-                                          child: const Icon(Icons.more_vert, color: Color(0xFFFF8A00), size: 20),
+                                          child: const Icon(Icons.more_vert, color: Colors.white70, size: 20),
                                         ),
                                       ),
                                     ),

@@ -112,6 +112,24 @@ Future<void> deletePhotoRemote(String url) async {
       .remove([objectPath]);
 }
 
+/// Purge tout le dossier Storage d'un ride (`$userId/$rideId/`).
+///
+/// Plus robuste que la suppression photo-par-photo via URL : attrape aussi les
+/// fichiers orphelins (upload réussi mais URL jamais persistée dans Hive).
+/// Best-effort : toute erreur est avalée (hors-ligne, dossier déjà vide…).
+Future<void> deleteRidePhotosFolder(String userId, String rideId) async {
+  try {
+    final storage = Supabase.instance.client.storage.from(kWaypointPhotosBucket);
+    final prefix = '$userId/${_sanitize(rideId)}';
+    final objects = await storage.list(path: prefix);
+    if (objects.isEmpty) return;
+    final paths = objects.map((o) => '$prefix/${o.name}').toList();
+    await storage.remove(paths);
+  } catch (e) {
+    debugPrint('[PHOTO_SYNC] deleteRidePhotosFolder $rideId: $e');
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BALAYEUR
 //

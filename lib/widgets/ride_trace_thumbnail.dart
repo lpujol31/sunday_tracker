@@ -80,29 +80,79 @@ class RideTracePainter extends CustomPainter {
       path.lineTo(offset.dx, offset.dy);
     }
 
+    final start = convert(points.first);
+    final end = convert(points.last);
+
+    // Couleurs départ → arrivée (vert → rouge).
+    const startColor = Color(0xFF16A34A); // vert
+    const endColor = Color(0xFFEF4444); // rouge
+
+    // Ombre portée sous le tracé : effet relief « posé sur la carte ».
+    final shadowPaint = Paint()
+      ..color = Colors.black.withValues(alpha: 0.55)
+      ..strokeWidth = 5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke
+      ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 2);
+    canvas.save();
+    canvas.translate(0, 1.2);
+    canvas.drawPath(path, shadowPaint);
+    canvas.restore();
+
+    // Tracé principal en dégradé départ → arrivée.
     final tracePaint = Paint()
-      ..color = Colors.orange
+      ..shader = ui.Gradient.linear(
+        start,
+        end,
+        const [startColor, endColor],
+      )
       ..strokeWidth = 4
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..style = PaintingStyle.stroke;
-
     canvas.drawPath(path, tracePaint);
 
-    final start = convert(points.first);
-    final end = convert(points.last);
+    // ── Marqueur d'ARRIVÉE : plus grand, rouge, mis en avant (halo) ──
+    // Dessiné en premier pour qu'en cas de boucle (départ ≈ arrivée),
+    // la petite pastille de départ reste visible par-dessus.
+    canvas.drawCircle(
+      end,
+      12,
+      Paint()
+        ..color = endColor.withValues(alpha: 0.28)
+        ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 3),
+    );
+    _drawMarker(canvas, end, radius: 7, color: endColor, ringWidth: 2.4);
 
-    canvas.drawCircle(start, 7, Paint()..color = Colors.green);
-    canvas.drawCircle(start, 7, Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2);
+    // ── Marqueur de DÉPART : petit, vert, par-dessus ──
+    _drawMarker(canvas, start, radius: 4, color: startColor, ringWidth: 1.6);
+  }
 
-    canvas.drawCircle(end, 7, Paint()..color = Colors.red);
-    canvas.drawCircle(end, 7, Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2);
+  /// Pastille pleine cerclée de blanc, avec une légère ombre de contact.
+  void _drawMarker(
+    Canvas canvas,
+    Offset center, {
+    required double radius,
+    required Color color,
+    required double ringWidth,
+  }) {
+    canvas.drawCircle(
+      center.translate(0, 0.8),
+      radius + ringWidth / 2,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.35)
+        ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 1.5),
+    );
+    canvas.drawCircle(center, radius, Paint()..color = color);
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = ringWidth,
+    );
   }
 
   @override

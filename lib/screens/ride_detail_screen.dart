@@ -485,14 +485,22 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   Future<void> _deletePhotoFromWaypoint(Map wp, dynamic photoEntry) async {
     final local = photoLocalPath(photoEntry);
     final url = photoUrl(photoEntry);
-    if (local != null) { try { await File(local).delete(); } catch (_) {} }
-    if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
-    final photos = wp['photos'] as List?;
-    photos?.removeWhere(
-        (e) => photoLocalPath(e) == local && photoUrl(e) == url);
+    // Retire l'entrée en reconstruisant une nouvelle liste (robuste même si la
+    // liste d'origine est non-modifiable, ex. sortie restaurée depuis JSON).
+    final current = (wp['photos'] as List?) ?? const [];
+    wp['photos'] = current
+        .where((e) => !(identical(e, photoEntry) ||
+            (photoLocalPath(e) == local && photoUrl(e) == url)))
+        .toList();
+    // Rafraîchit l'UI tout de suite : la croix ne doit jamais attendre le réseau.
     await Hive.box('rides').put(widget.rideKey, widget.ride);
-    setState(() {});
+    if (mounted) setState(() {});
     _syncRideToSupabase(widget.ride);
+    // Nettoyage disque + Storage en arrière-plan (non bloquant).
+    () async {
+      if (local != null) { try { await File(local).delete(); } catch (_) {} }
+      if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
+    }();
   }
 
   void _syncRideToSupabase(Map ride) async {
@@ -2106,18 +2114,12 @@ class _AltitudeProfilePainter extends CustomPainter {
 // ════════════════════════════════════════════════════════════════════════════
 Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool popAfterDelete = false}) async {
   try {
-    final safetySessionId = ride['safetySessionId'];
-    if (safetySessionId != null) {
-      final supabase = Supabase.instance.client;
-      await supabase.from('safety_positions').delete().eq('session_id', safetySessionId);
-      await supabase.from('safety_sessions').delete().eq('id', safetySessionId);
-    }
+    // 1. Hive = source de vérité locale : on supprime en premier pour que la
+    //    sortie disparaisse de la liste même hors-ligne. Le nettoyage réseau
+    //    qui suit est best-effort (chaque appel isolé dans son try/catch).
+    await Hive.box('rides').delete(rideKey);
 
-    final startedAt = ride['startTime'] as String?;
-    if (startedAt != null) {
-      await Supabase.instance.client.from('rides').delete().eq('started_at', startedAt);
-    }
-
+    // 2. Fichiers photos locaux.
     final waypoints = (ride['waypoints'] as List?)?.cast<Map>() ?? [];
     for (final wp in waypoints) {
       final photos = (wp['photos'] as List?) ?? [];
@@ -2126,12 +2128,33 @@ Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool p
         if (local != null) {
           try { final f = File(local); if (await f.exists()) await f.delete(); } catch (_) {}
         }
-        final url = photoUrl(entry);
-        if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
       }
     }
 
-    await Hive.box('rides').delete(rideKey);
+    // 3. Nettoyage Supabase best-effort.
+    final supabase = Supabase.instance.client;
+    final userId = supabase.auth.currentUser?.id;
+    final startedAt = ride['startTime'] as String?;
+
+    final safetySessionId = ride['safetySessionId'];
+    if (safetySessionId != null) {
+      // positions avant sessions (contrainte FK).
+      try { await supabase.from('safety_positions').delete().eq('session_id', safetySessionId); } catch (_) {}
+      try { await supabase.from('safety_sessions').delete().eq('id', safetySessionId); } catch (_) {}
+    }
+
+    if (startedAt != null) {
+      try {
+        var q = supabase.from('rides').delete().eq('started_at', startedAt);
+        if (userId != null) q = q.eq('user_id', userId);
+        await q;
+      } catch (_) {}
+    }
+
+    // 4. Storage : purge de tout le dossier du ride (attrape aussi les orphelins).
+    if (userId != null && startedAt != null) {
+      await deleteRidePhotosFolder(userId, startedAt);
+    }
 
     if (context.mounted) {
       if (popAfterDelete) Navigator.pop(context);

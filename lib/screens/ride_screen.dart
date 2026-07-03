@@ -216,7 +216,8 @@ class _RideScreenState extends State<RideScreen> {
   int _debugTapCount = 0;
   DateTime? _lastDebugTap;
   int? _debugStorageBytes; // octets utilisés sur le Storage (null = pas encore mesuré)
-  int _debugPendingPhotos = 0; // photos locales pas encore uploadées (url == null)
+  int _debugPendingPhotos = 0; // url == null ET fichier local présent → uploadables
+  int _debugOrphanPhotos = 0; // url == null ET fichier local absent → irrécupérables
   // Points GPS reçus mais NON enregistrés, par raison :
   int _ignoredAccuracy = 0; // précision > 20 m (signal trop flou)
   int _ignoredOutlier = 0;  // saut GPS impossible (téléportation)
@@ -2732,7 +2733,9 @@ class _RideScreenState extends State<RideScreen> {
             // distance gonflée quand on est arrêté / qu'on jardine sur place.
             // currentPosition est déjà à jour ci-dessus → dernière position
             // connue préservée pour l'UI, la notif et le save.
-            if (!kDebugMode && distance < max(5.0, position.accuracy)) {
+            // NB : active aussi en debug (contrairement aux autres filtres)
+            // pour pouvoir valider l'anti-gigue en flutter run sur le terrain.
+            if (distance < max(5.0, position.accuracy)) {
               _ignoredJitter++;
               return;
             }
@@ -2771,6 +2774,7 @@ class _RideScreenState extends State<RideScreen> {
   // pas encore uploadées. Appelé à l'ouverture du panneau debug.
   Future<void> _refreshStorageDebug() async {
     var pending = 0;
+    var orphan = 0;
     try {
       if (Hive.isBoxOpen('rides')) {
         for (final r in Hive.box('rides').values) {
@@ -2778,7 +2782,13 @@ class _RideScreenState extends State<RideScreen> {
           for (final wp in (r['waypoints'] as List? ?? const [])) {
             if (wp is! Map) continue;
             for (final p in (wp['photos'] as List? ?? const [])) {
-              if (photoUrl(p) == null && photoLocalPath(p) != null) pending++;
+              if (photoUrl(p) != null) continue; // déjà uploadée
+              final local = photoLocalPath(p);
+              if (local != null && File(local).existsSync()) {
+                pending++; // uploadable par le balayeur
+              } else {
+                orphan++; // fichier local perdu → jamais uploadable
+              }
             }
           }
         }
@@ -2795,6 +2805,7 @@ class _RideScreenState extends State<RideScreen> {
     if (mounted) {
       setState(() {
         _debugPendingPhotos = pending;
+        _debugOrphanPhotos = orphan;
         _debugStorageBytes = bytes;
       });
     }
@@ -2848,6 +2859,11 @@ class _RideScreenState extends State<RideScreen> {
                     '(${(_debugStorageBytes! / 1073741824 * 100).toStringAsFixed(1)} % util.)',
                   ),
                 Text('à uploader: $_debugPendingPhotos photo(s)'),
+                if (_debugOrphanPhotos > 0)
+                  Text(
+                    'perdues  : $_debugOrphanPhotos (fichier local absent)',
+                    style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
+                  ),
                 const SizedBox(height: 6),
                 Text(
                   'ignorés  : '

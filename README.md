@@ -2,8 +2,8 @@
 
 ## Stack
 
-flutter run → debug → kDebugMode = true → distanceFilter: 0
-flutter run --release ou build Play Store → kDebugMode = false → distanceFilter: 5
+flutter run → debug → kDebugMode = true / distanceFilter: 0
+flutter run --release → release → kDebugMode = false / distanceFilter: 5
 
 ### Github
 https://github.com/lpujol31/sunday_tracker
