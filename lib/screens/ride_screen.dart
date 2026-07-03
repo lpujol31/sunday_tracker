@@ -12,6 +12,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 import 'package:share_plus/share_plus.dart';
 import '../services/share_image_service.dart';
+import '../services/photo_sync_service.dart';
 import '../utils/date_labels.dart';
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -209,6 +210,18 @@ class _RideScreenState extends State<RideScreen> {
   bool gpsIsReady = false;
   bool gpsIsInitializing = true;
   DateTime? _lastPointTimestamp;
+
+  // ── Cheat code debug GPS (5 taps sur le bandeau cockpit) ──────
+  bool _showDebugPanel = false;
+  int _debugTapCount = 0;
+  DateTime? _lastDebugTap;
+  int? _debugStorageBytes; // octets utilisés sur le Storage (null = pas encore mesuré)
+  int _debugPendingPhotos = 0; // photos locales pas encore uploadées (url == null)
+  // Points GPS reçus mais NON enregistrés, par raison :
+  int _ignoredAccuracy = 0; // précision > 20 m (signal trop flou)
+  int _ignoredOutlier = 0;  // saut GPS impossible (téléportation)
+  int _ignoredJitter = 0;   // bougé < max(5 m, précision) → gigue à l'arrêt
+
   final List<Map<String, dynamic>> rideWaypoints = [];
   final ImagePicker _imagePicker = ImagePicker();
 
@@ -1746,7 +1759,8 @@ class _RideScreenState extends State<RideScreen> {
       ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) => Padding(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+          padding: EdgeInsets.fromLTRB(
+              24, 20, 24, 32 + MediaQuery.of(ctx).padding.bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1957,7 +1971,9 @@ class _RideScreenState extends State<RideScreen> {
             left: 24,
             right: 24,
             top: 24,
-            bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24,
+            bottom: MediaQuery.of(modalContext).viewInsets.bottom +
+                24 +
+                MediaQuery.of(modalContext).padding.bottom,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2066,7 +2082,8 @@ class _RideScreenState extends State<RideScreen> {
                             ),
                           ),
                           builder: (c) => Padding(
-                            padding: const EdgeInsets.all(20),
+                            padding: EdgeInsets.fromLTRB(
+                                20, 20, 20, 20 + MediaQuery.of(c).padding.bottom),
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -2142,16 +2159,20 @@ class _RideScreenState extends State<RideScreen> {
                     final lat = double.tryParse(latitude);
                     final lng = double.tryParse(longitude);
                     if (lat == null || lng == null) return;
-                    final List<String> permanentPaths = [];
-                    for (final path in selectedPhotoPaths)
-                      permanentPaths.add(await _copyPhotoToPermanentDir(path));
+                    final List<Map<String, dynamic>> photoEntries = [];
+                    for (final path in selectedPhotoPaths) {
+                      photoEntries.add({
+                        'local': await _copyPhotoToPermanentDir(path),
+                        'url': null,
+                      });
+                    }
                     setState(() {
                       rideWaypoints.add({
                         'lat': lat,
                         'lng': lng,
                         'note': noteController.text.trim(),
                         'timestamp': DateTime.now().toIso8601String(),
-                        'photos': permanentPaths,
+                        'photos': photoEntries,
                       });
                     });
                     Navigator.of(modalContext).pop();
@@ -2515,6 +2536,10 @@ class _RideScreenState extends State<RideScreen> {
     safetyUploadTimer?.cancel();
     safetyUploadTimer = null;
 
+    // Garantit que la dernière position connue termine le tracé, même si la
+    // porte anti-gigue a filtré les derniers points (arrêt en fin de sortie).
+    _appendFinalPosition();
+
     final progressNotifier = ValueNotifier<_SaveState>(
       const _SaveState('Synchronisation GPS…', 0.0),
     );
@@ -2630,6 +2655,8 @@ class _RideScreenState extends State<RideScreen> {
 
     progressNotifier.value = const _SaveState('Sync cloud…', 0.8);
     _syncRideToSupabase(rideData);
+    // Monte les photos du waypoint sur le Storage en arrière-plan (offline-safe).
+    syncPendingPhotos();
 
     progressNotifier.value = const _SaveState('Finalisation…', 0.9);
     if (safetySessionId != null) {
@@ -2678,7 +2705,10 @@ class _RideScreenState extends State<RideScreen> {
             Future.microtask(() {
               if (mounted) mapController.move(newPoint, mapController.camera.zoom);
             });
-          if (!kDebugMode && position.accuracy > 20) return;
+          if (!kDebugMode && position.accuracy > 20) {
+            _ignoredAccuracy++;
+            return;
+          }
           if (ridePoints.isNotEmpty) {
             final lastPoint = ridePoints.last;
             final distance = distanceCalculator.as(
@@ -2693,8 +2723,19 @@ class _RideScreenState extends State<RideScreen> {
                       .abs()
                 : 1;
             if (!kDebugMode &&
-                distance > (50.0 * max(dt, 1)) + (position.accuracy * 5))
+                distance > (50.0 * max(dt, 1)) + (position.accuracy * 5)) {
+              _ignoredOutlier++;
               return;
+            }
+            // Porte anti-gigue : on ne grave pas le point tant qu'on n'a pas
+            // bougé au-delà du bruit GPS. Évite le "plat de spaghetti" et la
+            // distance gonflée quand on est arrêté / qu'on jardine sur place.
+            // currentPosition est déjà à jour ci-dessus → dernière position
+            // connue préservée pour l'UI, la notif et le save.
+            if (!kDebugMode && distance < max(5.0, position.accuracy)) {
+              _ignoredJitter++;
+              return;
+            }
             totalDistance += distance;
           }
           ridePoints.add(newPoint);
@@ -2708,6 +2749,162 @@ class _RideScreenState extends State<RideScreen> {
           _currentRideBox?.add(gpsPoint);
           _lastPointTimestamp = position.timestamp;
         });
+  }
+
+  // ── Cheat code : 5 taps rapides dans le coin haut-gauche ──────
+  void _onDebugTap() {
+    final now = DateTime.now();
+    if (_lastDebugTap == null ||
+        now.difference(_lastDebugTap!) > const Duration(seconds: 1)) {
+      _debugTapCount = 0;
+    }
+    _lastDebugTap = now;
+    _debugTapCount++;
+    if (_debugTapCount >= 5) {
+      _debugTapCount = 0;
+      setState(() => _showDebugPanel = !_showDebugPanel);
+      if (_showDebugPanel) _refreshStorageDebug();
+    }
+  }
+
+  // Mesure l'espace Storage utilisé (RPC serveur) + compte les photos locales
+  // pas encore uploadées. Appelé à l'ouverture du panneau debug.
+  Future<void> _refreshStorageDebug() async {
+    var pending = 0;
+    try {
+      if (Hive.isBoxOpen('rides')) {
+        for (final r in Hive.box('rides').values) {
+          if (r is! Map) continue;
+          for (final wp in (r['waypoints'] as List? ?? const [])) {
+            if (wp is! Map) continue;
+            for (final p in (wp['photos'] as List? ?? const [])) {
+              if (photoUrl(p) == null && photoLocalPath(p) != null) pending++;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    int? bytes;
+    try {
+      final res = await Supabase.instance.client.rpc('waypoint_storage_usage');
+      if (res is num) bytes = res.toInt();
+      else if (res is String) bytes = int.tryParse(res);
+    } catch (e) {
+      debugPrint('[DEBUG] storage usage: $e');
+    }
+    if (mounted) {
+      setState(() {
+        _debugPendingPhotos = pending;
+        _debugStorageBytes = bytes;
+      });
+    }
+  }
+
+  String _fmtMo(int bytes) => '${(bytes / 1048576).toStringAsFixed(1)} Mo';
+
+  // Overlay debug : compteurs GPS live. Déclenché par 5 taps rapides sur le
+  // bandeau cockpit. Ancré sous les boutons Repère/Danger (zone libre) et en
+  // IgnorePointer pour ne bloquer aucun tap de la carte ou des boutons.
+  Widget _buildDebugOverlay() {
+    if (!_showDebugPanel) return const SizedBox.shrink();
+    final safeTop = MediaQuery.of(context).padding.top;
+    return Positioned(
+      top: safeTop + 96,
+      left: 12,
+      child: IgnorePointer(
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.85),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: DefaultTextStyle(
+            style: const TextStyle(
+              color: Colors.greenAccent,
+              fontSize: 15,
+              height: 1.5,
+              fontFamily: 'monospace',
+              fontWeight: FontWeight.w600,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('── DEBUG GPS ──'),
+                Text('tracé    : ${ridePoints.length}'),
+                Text('points   : ${_pointsWithAlt.length}'),
+                Text('queue up : ${_uploadQueue.length}'),
+                Text('précision: $accuracy m'),
+                Text('distance : ${totalDistance.toStringAsFixed(1)} m'),
+                Text('pause    : $rideIsPaused'),
+                const SizedBox(height: 6),
+                const Text('── STOCKAGE ──'),
+                Text(_debugStorageBytes == null
+                    ? 'utilisé  : … / 1 Go'
+                    : 'utilisé  : ${_fmtMo(_debugStorageBytes!)} / 1 Go'),
+                if (_debugStorageBytes != null)
+                  Text(
+                    'libre    : ${_fmtMo(1073741824 - _debugStorageBytes!)} '
+                    '(${(_debugStorageBytes! / 1073741824 * 100).toStringAsFixed(1)} % util.)',
+                  ),
+                Text('à uploader: $_debugPendingPhotos photo(s)'),
+                const SizedBox(height: 6),
+                Text(
+                  'ignorés  : '
+                  '${_ignoredAccuracy + _ignoredOutlier + _ignoredJitter}',
+                  style: const TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Text(' · gigue     : $_ignoredJitter'),
+                Text(' · précision : $_ignoredAccuracy'),
+                Text(' · saut GPS  : $_ignoredOutlier'),
+                const SizedBox(height: 6),
+                const Text(
+                  'Un point est ignoré si :',
+                  style: TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                const Text(
+                  '· gigue : bougé < max(5 m, précision)\n'
+                  '· précision : > 20 m (signal flou)\n'
+                  '· saut GPS : distance/temps impossible',
+                  style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Grave la dernière position connue en fin de sortie ────────
+  // La porte anti-gigue a pu filtrer les derniers points (arrêt sur place).
+  // On garantit que le tracé se termine sur la position réelle du rider.
+  void _appendFinalPosition() {
+    final pos = currentPosition;
+    if (pos == null) return;
+    final newPoint = LatLng(pos.latitude, pos.longitude);
+    if (ridePoints.isNotEmpty) {
+      final d = distanceCalculator.as(
+        LengthUnit.Meter,
+        ridePoints.last,
+        newPoint,
+      );
+      if (d < 1.0) return; // déjà gravée
+      totalDistance += d;
+    }
+    ridePoints.add(newPoint);
+    final gpsPoint = {
+      'lat': pos.latitude,
+      'lng': pos.longitude,
+      'alt': pos.altitude,
+    };
+    _pointsWithAlt.add(gpsPoint);
+    _uploadQueue.add(gpsPoint);
+    _currentRideBox?.add(gpsPoint);
   }
 
   Future<Map<String, String>> getRideLocationTags() async {
@@ -2762,7 +2959,9 @@ class _RideScreenState extends State<RideScreen> {
         return Padding(
         padding: EdgeInsets.only(
           left: 24, right: 24, top: 24,
-          bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24,
+          bottom: MediaQuery.of(modalContext).viewInsets.bottom +
+              24 +
+              MediaQuery.of(modalContext).padding.bottom,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -3625,6 +3824,7 @@ class _RideScreenState extends State<RideScreen> {
         : _buildCockpitBanner(topInset: effectiveTopInset);
 
     final banner = GestureDetector(
+      onTap: _onDebugTap, // cheat code : 5 taps → panneau debug GPS
       onLongPressStart: (_) {
         HapticFeedback.mediumImpact();
         setState(() {
@@ -4250,7 +4450,8 @@ class _RideScreenState extends State<RideScreen> {
 
                       if (!rideIsStarted && !_mapFullscreen)
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+                          padding: EdgeInsets.fromLTRB(
+                              12, 10, 12, 16 + MediaQuery.of(context).padding.bottom),
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -4450,6 +4651,9 @@ class _RideScreenState extends State<RideScreen> {
               ),
             ),
           ],
+
+          // Cheat code debug GPS : 5 taps dans le coin haut-gauche.
+          _buildDebugOverlay(),
         ],
       ),
     );
@@ -4548,16 +4752,6 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
-  // Replie le panneau à sa taille minimale (tap sur « Réduire les détails »).
-  void _reduceSheet() {
-    if (!_sheetController.isAttached) return;
-    _sheetController.animateTo(
-      _minSize,
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeOut,
-    );
-  }
-
   void _tick() {
     if (!mounted) return;
     setState(() {
@@ -4653,34 +4847,6 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
       ),
     );
 
-  // Bouton « ﹀ Réduire » sur la ligne du titre → replie le panneau.
-  Widget _reducePill() => GestureDetector(
-        onTap: _reduceSheet,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E1E20),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.keyboard_arrow_down, color: Colors.white54, size: 15),
-              SizedBox(width: 3),
-              Text(
-                'Réduire',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.white70,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-
   Widget _buildHeader() {
     final isPaused = _live['rideIsPaused'] as bool;
     final rideColor = isPaused ? const Color(0xFFfb923c) : const Color(0xFF4ade80);
@@ -4706,8 +4872,6 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              _reducePill(),
             ],
           ),
           const SizedBox(height: 4),
@@ -5288,7 +5452,9 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
               child: _buildAlertesCard(),
             )),
-            const SliverToBoxAdapter(child: SizedBox(height: 40)),
+            SliverToBoxAdapter(
+                child: SizedBox(
+                    height: 40 + MediaQuery.of(context).padding.bottom)),
           ],
         ),
       ),

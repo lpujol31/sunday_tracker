@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
+import '../services/photo_sync_service.dart';
 import '../utils/date_labels.dart';
 import '../widgets/ride_trace_thumbnail.dart';
 import '../widgets/ride_share_card.dart';
@@ -158,6 +159,9 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       _initialSync();
     }
+    // Rattrape en arrière-plan les photos pas encore montées sur le Storage
+    // (offline-safe : sans réseau, ça ne fait rien et retentera au prochain lancement).
+    syncPendingPhotos();
   }
 
   // Upload une fois tous les rides Hive existants vers Supabase
@@ -588,7 +592,8 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       builder: (_) {
         return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          padding: EdgeInsets.fromLTRB(
+              20, 16, 20, 32 + MediaQuery.of(context).padding.bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1337,6 +1342,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
 
                   return ListView(
+                    padding: EdgeInsets.only(
+                        bottom: MediaQuery.of(context).padding.bottom),
                     children: [
                       ...recentRides.map(buildCard),
                       if (oldRides.isNotEmpty) ...[

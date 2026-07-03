@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:sunday_tracker/widgets/ride_share_card.dart';
 import 'package:sunday_tracker/utils/date_labels.dart';
+import 'package:sunday_tracker/services/photo_sync_service.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -27,10 +28,17 @@ class RideDetailScreen extends StatefulWidget {
   State<RideDetailScreen> createState() => _RideDetailScreenState();
 }
 
-class _RideDetailScreenState extends State<RideDetailScreen> {
+class _RideDetailScreenState extends State<RideDetailScreen>
+    with TickerProviderStateMixin {
   late String rideName;
   late String rideNote;
   final MapController mapController = MapController();
+
+  // Animation maison de la taille du panneau : on pilote `jumpTo` frame par
+  // frame (l'animateTo natif du DraggableScrollableSheet est peu fiable ici —
+  // il se fait interrompre et s'arrête en chemin).
+  late final AnimationController _sizeAnimCtrl;
+  VoidCallback? _sizeAnimListener;
 
   // ── Styles de carte ──────────────────────────────────────────────────────────
   static const String _prefKeyMapStyle = 'detail_map_style_index';
@@ -46,9 +54,9 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   ];
 
   // ── Sheet glissant ───────────────────────────────────────────────────────────
-  static const double _kMinSize     = 0.20;
-  static const double _kInitialSize = 0.95;
-  static const double _kMaxSize     = 0.95;
+  static const double _kMinSize     = 0.20; // réduit
+  static const double _kInitialSize = 0.50; // « Agrandir » → 50 % carte / 50 % panneau
+  static const double _kMaxSize     = 0.95; // tirer plus haut → plein écran
   static const double _kFloorSize   = 0.01;
   late DraggableScrollableController _sheetController;
   bool _isClosing = false;
@@ -67,6 +75,10 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         .toList();
     _sheetController = DraggableScrollableController();
     _sheetController.addListener(_onPanelChanged);
+    _sizeAnimCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (_ridePoints.isEmpty) return;
@@ -78,8 +90,32 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
 
   @override
   void dispose() {
+    _sizeAnimCtrl.dispose();
     _sheetController.dispose();
     super.dispose();
+  }
+
+  // Anime la taille du panneau vers [target] en pilotant jumpTo frame par
+  // frame (robuste : rien ne peut interrompre l'animation, contrairement à
+  // DraggableScrollableController.animateTo).
+  void _animateSheetTo(double target) {
+    if (!_sheetController.isAttached) return;
+    final begin = _sheetController.size;
+    if (_sizeAnimListener != null) {
+      _sizeAnimCtrl.removeListener(_sizeAnimListener!);
+    }
+    _sizeAnimCtrl.stop();
+    final anim = _sizeAnimCtrl.drive(
+      Tween<double>(begin: begin, end: target)
+          .chain(CurveTween(curve: Curves.easeOut)),
+    );
+    _sizeAnimListener = () {
+      if (_sheetController.isAttached) {
+        _sheetController.jumpTo(anim.value.clamp(_kFloorSize, _kMaxSize));
+      }
+    };
+    _sizeAnimCtrl.addListener(_sizeAnimListener!);
+    _sizeAnimCtrl.forward(from: 0);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -293,7 +329,9 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         return Padding(
           padding: EdgeInsets.only(
             left: 24, right: 24, top: 24,
-            bottom: MediaQuery.of(modalContext).viewInsets.bottom + 24,
+            bottom: MediaQuery.of(modalContext).viewInsets.bottom +
+                24 +
+                MediaQuery.of(modalContext).padding.bottom,
           ),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Modifier la sortie',
@@ -362,7 +400,9 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         return Padding(
           padding: EdgeInsets.only(
             left: 20, right: 20, top: 16,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom +
+                20 +
+                MediaQuery.of(ctx).padding.bottom,
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(width: 36, height: 4,
@@ -442,10 +482,14 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
     _syncRideToSupabase(updatedRide);
   }
 
-  Future<void> _deletePhotoFromWaypoint(Map wp, String photoPath) async {
-    try { await File(photoPath).delete(); } catch (_) {}
+  Future<void> _deletePhotoFromWaypoint(Map wp, dynamic photoEntry) async {
+    final local = photoLocalPath(photoEntry);
+    final url = photoUrl(photoEntry);
+    if (local != null) { try { await File(local).delete(); } catch (_) {} }
+    if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
     final photos = wp['photos'] as List?;
-    if (photos != null) photos.remove(photoPath);
+    photos?.removeWhere(
+        (e) => photoLocalPath(e) == local && photoUrl(e) == url);
     await Hive.box('rides').put(widget.rideKey, widget.ride);
     setState(() {});
     _syncRideToSupabase(widget.ride);
@@ -480,9 +524,10 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) {
-          final photos = (wp['photos'] as List?)?.cast<String>().toList() ?? [];
+          final photos = (wp['photos'] as List?)?.toList() ?? [];
           return Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.fromLTRB(
+                24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 const Icon(Icons.place, color: Colors.blue, size: 22),
@@ -503,7 +548,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                     scrollDirection: Axis.horizontal,
                     itemCount: photos.length,
                     itemBuilder: (context, index) {
-                      final path = photos[index];
+                      final entry = photos[index];
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: Stack(children: [
@@ -512,19 +557,19 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                               context: context,
                               builder: (_) => Dialog(
                                 backgroundColor: Colors.black,
-                                child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
+                                child: InteractiveViewer(child: photoWidget(entry, fit: BoxFit.contain)),
                               ),
                             ),
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(12),
-                              child: Image.file(File(path), width: 120, height: 120, fit: BoxFit.cover),
+                              child: photoWidget(entry, width: 120, height: 120),
                             ),
                           ),
                           Positioned(
                             top: 4, right: 4,
                             child: GestureDetector(
                               onTap: () async {
-                                await _deletePhotoFromWaypoint(wp, path);
+                                await _deletePhotoFromWaypoint(wp, entry);
                                 setSheetState(() {});
                               },
                               child: Container(
@@ -562,11 +607,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         initialZoom: 13,
         onTap: (tapPos, latLng) {
           if (_sheetController.isAttached && _sheetController.size > _kMinSize + 0.02) {
-            _sheetController.animateTo(
-              _kMinSize,
-              duration: const Duration(milliseconds: 320),
-              curve: Curves.easeOut,
-            );
+            _animateSheetTo(_kMinSize);
           }
         },
       ),
@@ -784,47 +825,38 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       ),
     );
 
-    final listView = ListView(
-      controller: scrollController,
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 40),
-      physics: const ClampingScrollPhysics(),
-      children: [
-        _buildElevChartCard(altProfile),
+    // Cartes détaillées (mode étendu).
+    final detailCards = <Widget>[
+      _buildElevChartCard(altProfile),
+      const SizedBox(height: 10),
+      _buildSpeedCard(),
+      const SizedBox(height: 10),
+      if (hasWeather) ...[
+        _buildWeatherCard(),
         const SizedBox(height: 10),
-        _buildSpeedCard(),
-        const SizedBox(height: 10),
-        if (hasWeather) ...[
-          _buildWeatherCard(),
-          const SizedBox(height: 10),
-        ],
-        Container(height: 1, color: Colors.white.withValues(alpha: 0.07)),
-        const SizedBox(height: 14),
-        _buildPassagePoints(waypointsData),
-        const SizedBox(height: 10),
-        _buildNoteCard(),
-        const SizedBox(height: 14),
-        _buildDeleteBtn(),
       ],
-    );
+      Container(height: 1, color: Colors.white.withValues(alpha: 0.07)),
+      const SizedBox(height: 14),
+      _buildPassagePoints(waypointsData),
+      const SizedBox(height: 10),
+      _buildNoteCard(),
+      const SizedBox(height: 14),
+      _buildDeleteBtn(),
+    ];
 
     return AnimatedBuilder(
       animation: _sheetController,
-      builder: (context, child) {
+      builder: (context, _) {
         final isReduced = !_sheetController.isAttached ||
             _sheetController.size < _kMinSize + 0.05;
 
         void toggle() {
-          if (!_sheetController.isAttached) return;
-          final target = isReduced ? _kInitialSize : _kMinSize;
-          _sheetController.animateTo(
-            target,
-            duration: const Duration(milliseconds: 320),
-            curve: Curves.easeOut,
-          );
+          _animateSheetTo(isReduced ? _kInitialSize : _kMinSize);
         }
 
-        // Pastille bascule (chevron animé + libellé), style cockpit.
-        // Réduit : ︿ « Voir les détails » · Étendu : ﹀ « Réduire ».
+        // Pastille « Voir les détails » (chevron + libellé), style cockpit,
+        // affichée uniquement en mode réduit ; en mode étendu, la barre de
+        // drag suffit à replier le panneau.
         Widget buildPill() => GestureDetector(
               onTap: toggle,
               child: Container(
@@ -862,42 +894,32 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
               ),
             );
 
-        // Panneau sombre arrondi.
-        // - Réduit  : mini-bande seule (la pastille flotte au-dessus).
-        // - Étendu  : poignée + « Réduire » DANS le panneau (pas de collision
-        //   avec l'app bar) + mini-bande.
-        final darkTop = GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: toggle,
-          child: Container(
-            decoration: decoration,
-            child: Column(
+        // En-tête étendu : poignée + titre + date + statut « Terminée »
+        // + mini-bande.
+        Widget expandedHeader() => Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (isReduced)
-                  const SizedBox(height: 6)
-                else ...[
-                  const SizedBox(height: 8),
-                  Container(
-                    width: 36, height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+                const SizedBox(height: 8),
+                Container(
+                  width: 36, height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
                   ),
-                  const SizedBox(height: 10),
-                  // En-tête façon cockpit : titre + « ﹀ Réduire » sur la même
-                  // ligne, sous-titre (date) et statut « Terminée » (ride fini,
-                  // donc pas de chip GPS).
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
+                ),
+                const SizedBox(height: 10),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: _showEditModal,
+                              behavior: HitTestBehavior.opaque,
                               child: Text(
                                 rideName,
                                 style: const TextStyle(
@@ -910,92 +932,133 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            buildPill(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        _formatDateSub(),
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white54),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4ade80)
+                              .withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.check_circle_outline,
+                                size: 14, color: Color(0xFF4ade80)),
+                            SizedBox(width: 5),
+                            Text(
+                              'Terminée',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF4ade80),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ],
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          _formatDateSub(),
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.white54),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF4ade80)
-                                .withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.check_circle_outline,
-                                  size: 14, color: Color(0xFF4ade80)),
-                              SizedBox(width: 5),
-                              Text(
-                                'Terminée',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF4ade80),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 12),
-                ],
+                ),
+                const SizedBox(height: 12),
                 _buildMiniStrip(),
-                if (isReduced) const SizedBox(height: 6),
+                const SizedBox(height: 12),
               ],
-            ),
-          ),
-        );
+            );
 
-        return Column(
+        // IMPORTANT : la structure des slivers est IDENTIQUE dans les deux
+        // modes (mêmes dimensions de scroll). Sinon, changer le contenu à
+        // mi-course interrompt l'animation du sheet → animateTo(0.5) se bloque.
+        // Le look réduit est obtenu par opacité (contenu masqué) + un overlay
+        // flottant, sans jamais toucher aux slivers.
+        return Stack(
           children: [
-            // Réduit : la pastille FLOTTE au-dessus du panneau (carte derrière).
-            if (isReduced)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Center(child: buildPill()),
-              ),
-            darkTop,
-            // Corps : sombre en mode étendu, transparent (carte visible) en réduit.
-            // Toujours présent pour que le drag du sheet fonctionne.
-            Expanded(
+            Positioned.fill(
               child: Container(
-                color: isReduced ? null : panelColor,
-                child: Opacity(
-                  opacity: isReduced ? 0.0 : 1.0,
-                  child: IgnorePointer(ignoring: isReduced, child: child!),
+                decoration: isReduced ? null : decoration,
+                child: CustomScrollView(
+                  controller: scrollController,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverOpacity(
+                      opacity: isReduced ? 0.0 : 1.0,
+                      sliver: SliverToBoxAdapter(child: expandedHeader()),
+                    ),
+                    SliverPadding(
+                      padding: EdgeInsets.fromLTRB(
+                          14, 10, 14,
+                          40 + MediaQuery.of(context).padding.bottom),
+                      sliver: SliverOpacity(
+                        opacity: isReduced ? 0.0 : 1.0,
+                        sliver: SliverList(
+                          delegate: SliverChildListDelegate(detailCards),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
+            // Overlay flottant en mode réduit : pastille + card ancrées en bas.
+            // Les GestureDetector sont en onTap seul → le drag vertical traverse
+            // jusqu'au scroll dessous, qui redimensionne le sheet.
+            if (isReduced)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Center(child: buildPill()),
+                    const SizedBox(height: 8),
+                    GestureDetector(
+                      onTap: toggle,
+                      child: _buildMiniStrip(floating: true),
+                    ),
+                    SizedBox(height: 8 + MediaQuery.of(context).padding.bottom),
+                  ],
+                ),
+              ),
           ],
         );
       },
-      child: listView,
     );
   }
 
   // ── Mini bande stats ─────────────────────────────────────────────────────────
-  Widget _buildMiniStrip() {
+  Widget _buildMiniStrip({bool floating = false}) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 0, 14, 0),
+      padding: EdgeInsets.fromLTRB(floating ? 12 : 14, 0, floating ? 12 : 14, 0),
       child: Container(
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
+          // Réduit (flottant sur la carte) : fond sombre translucide + ombre.
+          // Étendu (dans le panneau) : léger voile blanc.
+          color: floating
+              ? Colors.black.withValues(alpha: 0.72)
+              : Colors.white.withValues(alpha: 0.05),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          boxShadow: floating
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 10,
+                  ),
+                ]
+              : null,
         ),
         child: Row(children: [
           _miniStat(Icons.route_outlined, const Color(0xFFfb923c),
@@ -1011,7 +1074,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
   Widget _miniStat(IconData icon, Color color, String value, String label) {
     return Expanded(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1024,7 +1087,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
             const SizedBox(height: 4),
             Text(value,
               style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: color,
-                  letterSpacing: -0.5),
+                  letterSpacing: -0.5, height: 1.0),
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center),
           ],
@@ -1282,7 +1345,7 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
         type: _PassageType.waypoint,
         time: _formatWaypointTime(wp['timestamp']),
         note: (wp['note'] as String?)?.trim(),
-        photos: (wp['photos'] as List?)?.cast<String>() ?? [],
+        photos: (wp['photos'] as List?)?.toList() ?? [],
         wp: wp,
       )),
       _PassageItem(type: _PassageType.end, time: endTime, coords: endCoords, altitude: altEnd != null ? '$altEnd m' : null),
@@ -1373,21 +1436,21 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
                 scrollDirection: Axis.horizontal,
                 itemCount: item.photos!.length,
                 itemBuilder: (ctx, i) {
-                  final path = item.photos![i];
+                  final entry = item.photos![i];
                   return Padding(
                     padding: const EdgeInsets.only(right: 6),
                     child: Stack(children: [
                       GestureDetector(
                         onTap: () => showDialog(context: context, builder: (_) => Dialog(
                           backgroundColor: Colors.black,
-                          child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
+                          child: InteractiveViewer(child: photoWidget(entry, fit: BoxFit.contain)),
                         )),
                         child: ClipRRect(borderRadius: BorderRadius.circular(7),
-                          child: Image.file(File(path), width: 50, height: 50, fit: BoxFit.cover)),
+                          child: photoWidget(entry, width: 50, height: 50)),
                       ),
                       Positioned(top: 2, right: 2,
                         child: GestureDetector(
-                          onTap: () => _deletePhotoFromWaypoint(item.wp!, path),
+                          onTap: () => _deletePhotoFromWaypoint(item.wp!, entry),
                           child: Container(
                             width: 16, height: 16,
                             decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
@@ -1495,7 +1558,8 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
       backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        padding: EdgeInsets.fromLTRB(
+            24, 20, 24, 32 + MediaQuery.of(ctx).padding.bottom),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(
             width: 36, height: 4, margin: const EdgeInsets.only(bottom: 20),
@@ -1695,8 +1759,10 @@ class _RideDetailScreenState extends State<RideDetailScreen> {
             initialChildSize: _kMinSize,
             minChildSize: _kFloorSize,
             maxChildSize: _kMaxSize,
-            snap: true,
-            snapSizes: const [_kMinSize, _kMaxSize],
+            // Pas de snap : sinon la simulation de snap interrompt animateTo
+            // (le panneau s'arrête en chemin). Drag libre → la carte se réduit
+            // en continu ; les boutons « Voir/Réduire » animent vers 0.50/0.20.
+            snap: false,
             builder: (context, scrollController) => _buildSheetContent(
               scrollController,
               altProfile,
@@ -1722,7 +1788,7 @@ class _PassageItem {
   final String? coords;
   final String? altitude;
   final String? note;
-  final List<String>? photos;
+  final List? photos;
   final Map? wp;
 
   const _PassageItem({
@@ -2054,9 +2120,14 @@ Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool p
 
     final waypoints = (ride['waypoints'] as List?)?.cast<Map>() ?? [];
     for (final wp in waypoints) {
-      final photos = (wp['photos'] as List?)?.cast<String>() ?? [];
-      for (final path in photos) {
-        try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
+      final photos = (wp['photos'] as List?) ?? [];
+      for (final entry in photos) {
+        final local = photoLocalPath(entry);
+        if (local != null) {
+          try { final f = File(local); if (await f.exists()) await f.delete(); } catch (_) {}
+        }
+        final url = photoUrl(entry);
+        if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
       }
     }
 
