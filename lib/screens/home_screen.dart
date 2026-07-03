@@ -220,6 +220,51 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Pull-to-refresh : recharge les sorties (et leurs infos) depuis Supabase
+  // puis rattrape les photos en attente. Merge par startTime pour éviter
+  // les doublons ; met à jour les sorties existantes.
+  Future<void> _refreshFromSupabase() async {
+    final box = _ridesBox;
+    if (box == null) return;
+    try {
+      final rows = await Supabase.instance.client
+          .from('rides')
+          .select()
+          .order('started_at');
+
+      // Index des sorties déjà présentes, par startTime.
+      final existingKeys = <String, dynamic>{};
+      for (int i = 0; i < box.length; i++) {
+        final ride = box.getAt(i) as Map?;
+        final startedAt = ride?['startTime'] as String?;
+        if (startedAt != null) existingKeys[startedAt] = box.keyAt(i);
+      }
+
+      for (final row in rows) {
+        final rideJson = row['ride_json'];
+        if (rideJson is! Map) continue;
+        final ride =
+            Map<String, dynamic>.from(rideJson.cast<String, dynamic>());
+        final startedAt = ride['startTime'] as String?;
+        if (startedAt == null) continue;
+        if (existingKeys.containsKey(startedAt)) {
+          await box.put(existingKeys[startedAt], ride);
+        } else {
+          await box.add(ride);
+        }
+      }
+    } catch (e) {
+      debugPrint('[SUPABASE] refresh: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Actualisation impossible (hors ligne ?)')),
+        );
+      }
+    }
+    // Rattrape les photos pas encore montées sur le Storage (offline-safe).
+    await syncPendingPhotos();
+  }
+
   void _syncRide(Map ride) async {
     final startedAt = ride['startTime'] as String?;
     final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -791,6 +836,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Centre le contenu tout en restant défilable, pour que le pull-to-refresh
+  // fonctionne même quand la liste est vide.
+  Widget _refreshableCenter({required Widget child}) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Center(child: child),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _rideMenuItem({
     required IconData icon,
     required Color iconColor,
@@ -1012,11 +1073,15 @@ class _HomeScreenState extends State<HomeScreen> {
             // LISTE DES SORTIES
             // ----------------------------------------------------------------
             Expanded(
-              child: ValueListenableBuilder(
+              child: RefreshIndicator(
+                onRefresh: _refreshFromSupabase,
+                color: Colors.orange,
+                backgroundColor: const Color(0xFF1B1B1B),
+                child: ValueListenableBuilder(
                 valueListenable: ridesBox.listenable(),
                 builder: (context, box, child) {
                   if (box.isEmpty) {
-                    return Center(
+                    return _refreshableCenter(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -1082,7 +1147,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   }).toList();
 
                   if (filteredRides.isEmpty) {
-                    return Center(
+                    return _refreshableCenter(
                       child: Text(
                         _searchQuery.trim().isEmpty
                             ? 'Aucune sortie sauvegardée'
@@ -1398,6 +1463,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
 
                   return ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
                     padding: EdgeInsets.only(
                         bottom: MediaQuery.of(context).padding.bottom),
                     children: [
@@ -1456,6 +1522,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   );
                 },
+                ),
               ),
             ),
 
