@@ -2,10 +2,14 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:sunday_tracker/widgets/ride_share_card.dart';
 import 'package:sunday_tracker/utils/date_labels.dart';
+import 'package:sunday_tracker/utils/geo_labels.dart';
+import 'package:sunday_tracker/screens/home_screen.dart' show kPracticeTypes, detectPractice;
 import 'package:sunday_tracker/services/photo_sync_service.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -44,6 +48,13 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   static const String _prefKeyMapStyle = 'detail_map_style_index';
   int _mapStyleIndex = 0;
 
+  // ── Noms des lieux (départ / arrivée) ────────────────────────────────────────
+  // Résolus par géocodage inverse. Pour les sorties récentes ils sont déjà dans
+  // le Map (calculés à la sauvegarde) ; pour les anciennes on les backfill à
+  // l'ouverture puis on les réécrit dans Hive (une seule fois, offline ensuite).
+  String? _startCity;
+  String? _endCity;
+
   // ── Recentrage auto ──────────────────────────────────────────────────────────
   bool _recentering = true;
   late List<LatLng> _ridePoints;
@@ -54,12 +65,21 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   ];
 
   // ── Sheet glissant ───────────────────────────────────────────────────────────
-  static const double _kMinSize     = 0.20; // réduit
+  static const double _kMinSize     = 0.32; // réduit (carte enrichie : pratique + départ/arrivée)
   static const double _kInitialSize = 0.50; // « Agrandir » → 50 % carte / 50 % panneau
   static const double _kMaxSize     = 0.95; // tirer plus haut → plein écran
   static const double _kFloorSize   = 0.01;
   late DraggableScrollableController _sheetController;
   bool _isClosing = false;
+
+  // ── Cheat code debug (5 taps rapides sur la poignée du panneau) ──────────────
+  bool _showDebugPanel = false;
+  int _debugTapCount = 0;
+  DateTime? _lastDebugTap;
+  int? _debugStorageBytes;      // octets utilisés sur le Storage (null = pas mesuré)
+  int _debugUploadedPhotos = 0; // url != null → déjà sur le Storage
+  int _debugPendingPhotos = 0;  // url == null ET fichier local présent → uploadables
+  int _debugOrphanPhotos = 0;   // url == null ET fichier local absent → perdues
 
   // ════════════════════════════════════════════════════════════════════════════
   // LIFECYCLE
@@ -73,6 +93,13 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     _ridePoints = (widget.ride['points'] as List)
         .map((p) => LatLng((p['lat'] as num).toDouble(), (p['lng'] as num).toDouble()))
         .toList();
+    // Noms de lieux : depuis le Map si présents (sorties récentes), sinon
+    // backfill par géocodage inverse (anciennes sorties).
+    _startCity = _nonEmpty(widget.ride['startCity']) ?? _nonEmpty(widget.ride['city']);
+    _endCity = _nonEmpty(widget.ride['endCity']);
+    if ((_startCity == null || _endCity == null) && _ridePoints.isNotEmpty) {
+      _backfillPlaceNames();
+    }
     _sheetController = DraggableScrollableController();
     _sheetController.addListener(_onPanelChanged);
     _sizeAnimCtrl = AnimationController(
@@ -146,6 +173,61 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         padding: EdgeInsets.fromLTRB(30, safeTop + 80, 30, screenH * fraction + 20),
       ),
     );
+  }
+
+  // Renvoie la chaîne si elle est non vide, sinon null.
+  String? _nonEmpty(dynamic v) {
+    if (v is String && v.trim().isNotEmpty) return v.trim();
+    return null;
+  }
+
+  // Backfill des noms de lieux pour les sorties qui n'en ont pas (anciennes
+  // sorties, ou géocodage raté à la sauvegarde). Résout 1er + dernier point,
+  // met à jour l'UI, puis persiste dans Hive + Supabase — une seule fois.
+  Future<void> _backfillPlaceNames() async {
+    String? start = _startCity;
+    String? end = _endCity;
+    try {
+      if (start == null) {
+        final marks = await placemarkFromCoordinates(
+            _ridePoints.first.latitude, _ridePoints.first.longitude);
+        if (marks.isNotEmpty) start = _nonEmpty(cityFromPlacemark(marks.first));
+      }
+      if (end == null) {
+        // Boucle : départ ≈ arrivée → on réutilise la ville de départ.
+        final last = _ridePoints.last;
+        final first = _ridePoints.first;
+        final sameSpot = (last.latitude - first.latitude).abs() < 1e-4 &&
+            (last.longitude - first.longitude).abs() < 1e-4;
+        if (sameSpot) {
+          end = start;
+        } else {
+          final marks = await placemarkFromCoordinates(last.latitude, last.longitude);
+          if (marks.isNotEmpty) end = _nonEmpty(cityFromPlacemark(marks.first));
+        }
+      }
+    } catch (_) {
+      // Hors-ligne / géocodeur indispo : on retentera à la prochaine ouverture.
+    }
+    if (!mounted) return;
+    if (start == _startCity && end == _endCity) return; // rien de neuf
+    setState(() {
+      _startCity = start;
+      _endCity = end;
+    });
+    // Persistance (seulement ce qu'on a réussi à résoudre).
+    if (start == null && end == null) return;
+    final updated = Map.from(widget.ride);
+    if (start != null) {
+      updated['startCity'] = start;
+      updated['city'] ??= start;
+    }
+    if (end != null) updated['endCity'] = end;
+    widget.ride['startCity'] = updated['startCity'];
+    widget.ride['endCity'] = updated['endCity'];
+    widget.ride['city'] = updated['city'];
+    await Hive.box('rides').put(widget.rideKey, updated);
+    _syncRideToSupabase(updated);
   }
 
   String _defaultName() {
@@ -907,12 +989,19 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         Widget expandedHeader() => Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const SizedBox(height: 8),
-                Container(
-                  width: 36, height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
+                // Poignée — cheat code : 5 taps rapides → panneau debug sortie
+                GestureDetector(
+                  onTap: _onDebugTap,
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 44),
+                    child: Container(
+                      width: 36, height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -943,44 +1032,15 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                           ),
                         ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        _formatDateSub(),
-                        style: const TextStyle(
-                            fontSize: 12, color: Colors.white54),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF4ade80)
-                              .withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.check_circle_outline,
-                                size: 14, color: Color(0xFF4ade80)),
-                            SizedBox(width: 5),
-                            Text(
-                              'Terminée',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF4ade80),
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 14),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: _buildPracticeAndEndpointsRow(),
+                ),
+                const SizedBox(height: 14),
                 _buildMiniStrip(),
                 const SizedBox(height: 12),
               ],
@@ -1034,7 +1094,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                     const SizedBox(height: 8),
                     GestureDetector(
                       onTap: toggle,
-                      child: _buildMiniStrip(floating: true),
+                      child: _buildReducedCard(),
                     ),
                     SizedBox(height: 8 + MediaQuery.of(context).padding.bottom),
                   ],
@@ -1044,6 +1104,205 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         );
       },
     );
+  }
+
+  // ── Carte réduite enrichie (flottante) ───────────────────────────────────────
+  // En-tête pratique + « Départ → Arrivée » + badge, puis mini-bande stats.
+  Widget _buildReducedCard() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withValues(alpha: 0.4), blurRadius: 10),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Ligne du haut : pavé pratique à gauche, Départ / Arrivée à droite
+            _buildPracticeAndEndpointsRow(),
+            const SizedBox(height: 10),
+            Container(height: 1, color: Colors.white.withValues(alpha: 0.08)),
+            const SizedBox(height: 4),
+            // Ligne du bas : Distance / Durée (icônes + valeurs plus grosses)
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  _miniStat(Icons.route_outlined, const Color(0xFFfb923c),
+                    _formatDistance(widget.ride['distanceMeters']), 'Distance',
+                    iconSize: 28, valueSize: 30),
+                  Container(width: 1, color: Colors.white.withValues(alpha: 0.10)),
+                  _miniStat(Icons.timer_outlined, const Color(0xFF4ade80),
+                    _formatDuration(widget.ride['durationSeconds']), 'Durée',
+                    iconSize: 28, valueSize: 30),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Ligne partagée (réduit + étendu) : pavé pratique à gauche, Départ / Arrivée
+  // (date-heure) à droite.
+  Widget _buildPracticeAndEndpointsRow() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(flex: 6, child: _buildPracticeHeader()),
+        const SizedBox(width: 10),
+        Expanded(
+          flex: 5,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Couleurs raccord avec les marqueurs du tracé :
+              // départ = orange, arrivée = violet.
+              _endpointRow(
+                Icons.schedule, const Color(0xFFfb923c), 'Départ',
+                _formatEndpointDateTime(widget.ride['startTime'])),
+              const SizedBox(height: 10),
+              _endpointRow(
+                Icons.sports_score, const Color(0xFFa78bfa), 'Arrivée',
+                _formatEndpointDateTime(widget.ride['endTime'])),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Une ligne « Départ / Arrivée » : icône + libellé + date-heure.
+  Widget _endpointRow(IconData icon, Color color, String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF9aa4ad))),
+              const SizedBox(height: 1),
+              Text(value,
+                style: const TextStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // « jeu. 2 juil. 2026 - 07:58 »
+  String _formatEndpointDateTime(dynamic iso) {
+    if (iso == null) return '--';
+    final dt = DateTime.tryParse(iso)?.toLocal();
+    if (dt == null) return '--';
+    const months = ['jan.','fév.','mars','avr.','mai','juin','juil.','août','sep.','oct.','nov.','déc.'];
+    final date = '${kFrDaysShort[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    final h = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    return '$date - $h';
+  }
+
+  // En-tête pratique : pastille + « Pratique · <label> » + itinéraire + badge.
+  // Partagé entre la carte réduite et le header étendu.
+  Widget _buildPracticeHeader() {
+    final practiceKey = _nonEmpty(widget.ride['practice']) ?? detectPractice(widget.ride);
+    final practice = kPracticeTypes[practiceKey] ?? kPracticeTypes['vtt']!;
+    final Color pColor = practice['color'] as Color;
+    final IconData pIcon = practice['icon'] as IconData;
+    final String pLabel = practice['label'] as String;
+
+    return Row(
+      children: [
+        Container(
+          width: 42, height: 42,
+          decoration: BoxDecoration(
+            color: pColor.withValues(alpha: 0.18),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(pIcon, color: pColor, size: 22),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Badge pratique (remplace l'ancien libellé « Pratique · … »)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: pColor.withValues(alpha: 0.6)),
+                ),
+                child: Text(pLabel,
+                  style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w600, color: pColor)),
+              ),
+              const SizedBox(height: 6),
+              _buildRouteLine(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Ligne « Départ → Arrivée ». Affiche un placeholder discret tant que le
+  // géocodage n'a pas résolu les noms.
+  Widget _buildRouteLine() {
+    final start = _startCity;
+    final end = _endCity;
+    if (start == null && end == null) {
+      return Text('Localisation…',
+        style: TextStyle(
+          fontSize: 15, fontWeight: FontWeight.w700,
+          color: Colors.white.withValues(alpha: 0.5)),
+        maxLines: 1, overflow: TextOverflow.ellipsis);
+    }
+    // Un seul côté résolu (géocodage partiel) → un seul nom.
+    if (start == null || end == null) {
+      return Text(start ?? end!,
+        style: const TextStyle(
+          fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white,
+          letterSpacing: -0.3),
+        maxLines: 1, overflow: TextOverflow.ellipsis);
+    }
+    // Départ + arrivée résolus → « A → B » (y compris boucle « A → A »).
+    return Row(children: [
+      Flexible(
+        child: Text(start,
+          style: const TextStyle(
+            fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white,
+            letterSpacing: -0.3),
+          maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Icon(Icons.arrow_forward, size: 15, color: Colors.white.withValues(alpha: 0.6)),
+      ),
+      Flexible(
+        child: Text(end,
+          style: const TextStyle(
+            fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white,
+            letterSpacing: -0.3),
+          maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+    ]);
   }
 
   // ── Mini bande stats ─────────────────────────────────────────────────────────
@@ -1079,25 +1338,28 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     );
   }
 
-  Widget _miniStat(IconData icon, Color color, String value, String label) {
+  Widget _miniStat(IconData icon, Color color, String value, String label,
+      {int flex = 1, double valueSize = 24, double iconSize = 22}) {
     return Expanded(
+      flex: flex,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 2),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 22, color: color),
+            Icon(icon, size: iconSize, color: color),
             const SizedBox(height: 3),
             Text(label,
               style: const TextStyle(fontSize: 11, color: Color(0xFF888888)),
               textAlign: TextAlign.center),
             const SizedBox(height: 4),
-            Text(value,
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: color,
-                  letterSpacing: -0.5, height: 1.0),
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(value,
+                style: TextStyle(fontSize: valueSize, fontWeight: FontWeight.w700, color: color,
+                    letterSpacing: -0.5, height: 1.0)),
+            ),
           ],
         ),
       ),
@@ -1692,6 +1954,208 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   // ════════════════════════════════════════════════════════════════════════════
   // BUILD
   // ════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
+  // CHEAT CODE DEBUG — 5 taps rapides sur la poignée du panneau
+  // ════════════════════════════════════════════════════════════════════════════
+  void _onDebugTap() {
+    final now = DateTime.now();
+    if (_lastDebugTap == null ||
+        now.difference(_lastDebugTap!) > const Duration(seconds: 1)) {
+      _debugTapCount = 0;
+    }
+    _lastDebugTap = now;
+    _debugTapCount++;
+    if (_debugTapCount >= 5) {
+      _debugTapCount = 0;
+      HapticFeedback.mediumImpact();
+      setState(() => _showDebugPanel = !_showDebugPanel);
+      if (_showDebugPanel) _refreshStorageDebug();
+    }
+  }
+
+  // Compte les photos de cette sortie par état (uploadée / à uploader / perdue)
+  // et mesure l'espace Storage global (RPC serveur). Appelé à l'ouverture.
+  Future<void> _refreshStorageDebug() async {
+    var uploaded = 0, pending = 0, orphan = 0;
+    for (final wp in (widget.ride['waypoints'] as List? ?? const [])) {
+      if (wp is! Map) continue;
+      for (final p in (wp['photos'] as List? ?? const [])) {
+        if (photoUrl(p) != null) {
+          uploaded++; // déjà sur le Storage
+          continue;
+        }
+        final local = photoLocalPath(p);
+        if (local != null && File(local).existsSync()) {
+          pending++; // uploadable par le balayeur
+        } else {
+          orphan++; // fichier local perdu → jamais uploadable
+        }
+      }
+    }
+    int? bytes;
+    try {
+      final res = await Supabase.instance.client.rpc('waypoint_storage_usage');
+      if (res is num) {
+        bytes = res.toInt();
+      } else if (res is String) {
+        bytes = int.tryParse(res);
+      }
+    } catch (e) {
+      debugPrint('[DEBUG] storage usage: $e');
+    }
+    if (mounted) {
+      setState(() {
+        _debugUploadedPhotos = uploaded;
+        _debugPendingPhotos = pending;
+        _debugOrphanPhotos = orphan;
+        _debugStorageBytes = bytes;
+      });
+    }
+  }
+
+  String _fmtMo(int bytes) => '${(bytes / 1048576).toStringAsFixed(1)} Mo';
+
+  // Panneau debug de la sortie : infos GPS, stats brutes, IDs, lien Sunday Live
+  // (tap = copier), et état du Storage. Ancré sous la top bar, scrollable.
+  Widget _buildDebugOverlay() {
+    if (!_showDebugPanel) return const SizedBox.shrink();
+    final safeTop = MediaQuery.of(context).padding.top;
+    final ride = widget.ride;
+
+    final points = ride['points'] as List? ?? const [];
+    final ptsAlt = points.where((p) => p is Map && p['alt'] != null).length;
+    final wps = ride['waypoints'] as List? ?? const [];
+    var photoTotal = 0;
+    for (final wp in wps) {
+      if (wp is Map) photoTotal += (wp['photos'] as List?)?.length ?? 0;
+    }
+
+    final shareCode = ride['safetyShareCode'];
+    final liveUrl = shareCode != null
+        ? 'https://sunday-tracker-live.web.app/?code=$shareCode'
+        : null;
+
+    double d(dynamic v) => (v ?? 0).toDouble();
+    const dim = TextStyle(color: Colors.white54, fontSize: 11);
+
+    return Positioned(
+      top: safeTop + 74,
+      left: 12,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width - 24,
+          maxHeight: MediaQuery.of(context).size.height * 0.62,
+        ),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.88),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.3)),
+          ),
+          child: DefaultTextStyle(
+            style: const TextStyle(
+              color: Colors.greenAccent,
+              fontSize: 13,
+              height: 1.5,
+              fontFamily: 'monospace',
+              fontWeight: FontWeight.w600,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(child: Text('── DEBUG SORTIE ──')),
+                      GestureDetector(
+                        onTap: () => setState(() => _showDebugPanel = false),
+                        child: const Icon(Icons.close,
+                            size: 18, color: Colors.greenAccent),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('── GPS ──'),
+                  Text('tracé     : ${points.length} pts'),
+                  Text('avec alt  : $ptsAlt pts'),
+                  Text('waypoints : ${wps.length}'),
+                  Text('photos    : $photoTotal'),
+                  const SizedBox(height: 6),
+                  const Text('── STATS BRUTES ──'),
+                  Text('distance  : ${d(ride['distanceMeters']).toStringAsFixed(0)} m'),
+                  Text('durée     : ${ride['durationSeconds'] ?? 0} s'),
+                  Text('D+        : ${d(ride['totalElevationMeters']).toStringAsFixed(0)} m'),
+                  Text('D-        : ${d(ride['totalElevationDown']).toStringAsFixed(0)} m'),
+                  Text('v. moy    : ${d(ride['avgSpeedKmh']).toStringAsFixed(1)} km/h'),
+                  Text('pratique  : ${ride['practice'] ?? '—'}'),
+                  Text('lieu      : ${[
+                    ride['city'],
+                    ride['department'],
+                    ride['region'],
+                  ].where((e) => (e ?? '').toString().isNotEmpty).join(' · ')}'),
+                  const SizedBox(height: 6),
+                  const Text('── DATES ──'),
+                  Text('début : ${ride['startTime'] ?? '—'}', style: dim),
+                  Text('fin   : ${ride['endTime'] ?? '—'}', style: dim),
+                  const SizedBox(height: 6),
+                  const Text('── SUNDAY LIVE ──'),
+                  if (liveUrl != null)
+                    GestureDetector(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: liveUrl));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Lien Sunday Live copié'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      },
+                      child: Text(
+                        '$liveUrl  ⧉ copier',
+                        style: const TextStyle(
+                          color: Color(0xFF60a5fa),
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  else
+                    const Text('(pas de session live)', style: dim),
+                  const SizedBox(height: 6),
+                  const Text('── IDS ──'),
+                  Text('rideKey   : ${widget.rideKey}', style: dim),
+                  Text('sessionId : ${ride['safetySessionId'] ?? '—'}', style: dim),
+                  Text('shareCode : ${shareCode ?? '—'}', style: dim),
+                  const SizedBox(height: 6),
+                  const Text('── STOCKAGE ──'),
+                  Text(_debugStorageBytes == null
+                      ? 'utilisé   : … / 1 Go'
+                      : 'utilisé   : ${_fmtMo(_debugStorageBytes!)} / 1 Go'),
+                  if (_debugStorageBytes != null)
+                    Text(
+                      'libre     : ${_fmtMo(1073741824 - _debugStorageBytes!)} '
+                      '(${(_debugStorageBytes! / 1073741824 * 100).toStringAsFixed(1)} % util.)',
+                    ),
+                  Text('uploadées : $_debugUploadedPhotos photo(s)'),
+                  Text('à uploader: $_debugPendingPhotos photo(s)'),
+                  if (_debugOrphanPhotos > 0)
+                    Text(
+                      'perdues   : $_debugOrphanPhotos (fichier local absent)',
+                      style: const TextStyle(
+                          color: Colors.orangeAccent, fontSize: 12),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final safeTop       = MediaQuery.of(context).padding.top;
@@ -1779,6 +2243,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
               ridePoints,
             ),
           ),
+
+          // 6. Cheat code debug : 5 taps sur la poignée du panneau
+          _buildDebugOverlay(),
         ],
       ),
     );

@@ -1,45 +1,210 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+/// Miniature d'une sortie affichée dans la liste d'accueil.
+///
+/// Rend une vraie mini-carte sombre/topographique (tuiles OpenTopoMap
+/// non interactives) avec la trace GPS en surimpression. Hors ligne, les
+/// tuiles ne se chargent pas : on garde alors un fond sombre + la trace,
+/// donc la vignette reste lisible sans réseau.
 class RideTraceThumbnail extends StatelessWidget {
   final List points;
+  final double width;
+  final double height;
+
+  /// Fond de carte (tuiles réseau). Désactivable pour un rendu 100 % offline
+  /// (trace seule sur fond sombre).
+  final bool showMap;
 
   const RideTraceThumbnail({
     super.key,
     required this.points,
+    this.width = 100,
+    this.height = 88,
+    this.showMap = true,
   });
+
+  // Couleur de fond sombre, sert aussi de fond quand les tuiles ne chargent pas.
+  static const Color _bg = Color(0xFF101418);
+
+  List<LatLng> _latLngPoints() {
+    final result = <LatLng>[];
+    for (final point in points) {
+      if (point is Map) {
+        final lat = point['lat'];
+        final lng = point['lng'];
+        if (lat is num && lng is num) {
+          result.add(LatLng(lat.toDouble(), lng.toDouble()));
+        }
+      }
+    }
+    return result;
+  }
+
+  // Réduit le nombre de points pour alléger le rendu (une seule vignette n'a
+  // pas besoin de milliers de segments).
+  List<LatLng> _downsample(List<LatLng> pts, int maxPoints) {
+    if (pts.length <= maxPoints) return pts;
+    final step = pts.length / maxPoints;
+    final out = <LatLng>[];
+    for (double i = 0; i < pts.length - 1; i += step) {
+      out.add(pts[i.floor()]);
+    }
+    out.add(pts.last); // toujours conserver l'arrivée
+    return out;
+  }
+
+  // Dégradé départ (vert) → milieu (orange) → arrivée (rouge).
+  List<Color> _traceGradient(int segments) {
+    const start = Color(0xFF22C55E);
+    const mid = Color(0xFFF59E0B);
+    const end = Color(0xFFEF4444);
+    if (segments <= 1) return [start];
+    return List.generate(segments, (i) {
+      final t = i / (segments - 1);
+      if (t <= 0.5) return Color.lerp(start, mid, t / 0.5)!;
+      return Color.lerp(mid, end, (t - 0.5) / 0.5)!;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    final ridePoints = points.map((point) {
-      return LatLng(
-        point['lat'],
-        point['lng'],
-      );
-    }).toList();
+    final ridePoints = _downsample(_latLngPoints(), 80);
+
+    // Bornes de la trace : nécessaires pour cadrer la carte. Si elles sont
+    // dégénérées (0 ou 1 point distinct), on retombe sur le rendu peintre.
+    final bounds = _boundsOrNull(ridePoints);
+
+    final Widget content;
+    if (!showMap || bounds == null) {
+      content = CustomPaint(painter: RideTracePainter(ridePoints));
+    } else {
+      content = _buildMap(ridePoints, bounds);
+    }
 
     return Container(
-    width: 75,
-    height: 60,
+      width: width,
+      height: height,
       decoration: BoxDecoration(
-        color: const Color(0xFF101418),
+        color: _bg,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: Colors.white12,
-        ),
+        border: Border.all(color: Colors.white12),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: CustomPaint(
-          painter: RideTracePainter(ridePoints),
+        child: content,
+      ),
+    );
+  }
+
+  LatLngBounds? _boundsOrNull(List<LatLng> pts) {
+    if (pts.length < 2) return null;
+    final bounds = LatLngBounds.fromPoints(pts);
+    // Étendue nulle (tous les points confondus) → cadrage impossible.
+    if (bounds.north == bounds.south && bounds.east == bounds.west) return null;
+    return bounds;
+  }
+
+  Widget _buildMap(List<LatLng> ridePoints, LatLngBounds bounds) {
+    final grad = _traceGradient(ridePoints.length - 1);
+    return FlutterMap(
+      options: MapOptions(
+        initialCameraFit: CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.all(14),
         ),
+        interactionOptions: const InteractionOptions(flags: InteractiveFlag.none),
+        backgroundColor: _bg,
+        keepAlive: false,
+      ),
+      children: [
+        TileLayer(
+          urlTemplate: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+          subdomains: const ['a', 'b', 'c'],
+          maxZoom: 17,
+          userAgentPackageName: 'com.example.sunday_tracker',
+          tileBuilder: _darkTileBuilder,
+        ),
+        // Voile sombre pour fondre la carte dans le thème dark/orange et
+        // faire ressortir la trace.
+        IgnorePointer(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.28),
+                  Colors.black.withValues(alpha: 0.42),
+                ],
+              ),
+            ),
+          ),
+        ),
+        PolylineLayer(
+          polylines: List.generate(
+            ridePoints.length - 1,
+            (i) => Polyline(
+              points: [ridePoints[i], ridePoints[i + 1]],
+              strokeWidth: 3.5,
+              color: grad[i],
+            ),
+          ),
+        ),
+        MarkerLayer(markers: [
+          Marker(
+            point: ridePoints.last,
+            width: 16,
+            height: 16,
+            child: _dot(const Color(0xFFEF4444), ring: 2),
+          ),
+          Marker(
+            point: ridePoints.first,
+            width: 12,
+            height: 12,
+            child: _dot(const Color(0xFF22C55E), ring: 1.6),
+          ),
+        ]),
+      ],
+    );
+  }
+
+  // Assombrit légèrement les tuiles topo (claires par défaut) pour coller au
+  // thème sombre de l'appli.
+  Widget _darkTileBuilder(BuildContext context, Widget tile, TileImage image) {
+    return ColorFiltered(
+      colorFilter: const ColorFilter.matrix(<double>[
+        0.72, 0, 0, 0, 0,
+        0, 0.74, 0, 0, 0,
+        0, 0, 0.70, 0, 0,
+        0, 0, 0, 1, 0,
+      ]),
+      child: tile,
+    );
+  }
+
+  Widget _dot(Color color, {required double ring}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: ring),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.45),
+            blurRadius: 2,
+          ),
+        ],
       ),
     );
   }
 }
 
+/// Rendu de secours (offline strict ou trace dégénérée) : trace seule dessinée
+/// sur le fond sombre, sans tuiles réseau.
 class RideTracePainter extends CustomPainter {
   final List<LatLng> points;
 

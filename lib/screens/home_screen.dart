@@ -37,12 +37,12 @@ const Map<String, Map<String, dynamic>> kPracticeTypes = {
   },
   'marche': {
     'label': 'Marche',
-    'color': Color(0xFFF59E0B),
+    'color': Color(0xFF14B8A6),
     'icon': Icons.directions_walk,
   },
   'running': {
     'label': 'Running',
-    'color': Color(0xFFF97316),
+    'color': Color(0xFFEC4899),
     'icon': Icons.directions_run,
   },
   'autre': {
@@ -555,6 +555,35 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Étiquette compteur (waypoints / photos) : teinte violette « contenu »,
+  // reprise du dégradé signature de l'appli, distincte de l'orange des lieux.
+  Widget buildCountTag(IconData icon, int count, String label) {
+    const color = Color(0xFFC084FC);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            '$count $label',
+            style: const TextStyle(
+              color: color,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget buildTag(String text) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -750,92 +779,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return duration.toString().split('.').first;
   }
 
-  // -------------------------------------------------------------------------
-  // MENU RAPIDE PAR RIDE
-  // -------------------------------------------------------------------------
-
-  void _showRideQuickMenu({
-    required BuildContext context,
-    required Map ride,
-    required dynamic rideKey,
-    required String rideName,
-  }) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (sheetCtx) => SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(
-              width: 36, height: 4,
-              margin: const EdgeInsets.only(bottom: 18),
-              decoration: BoxDecoration(
-                color: Colors.white24, borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            _rideMenuItem(
-              icon: Icons.image_outlined,
-              iconColor: Colors.purple,
-              title: 'Partager un résumé',
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                Navigator.push(context, MaterialPageRoute(
-                  builder: (_) => RideSharePreviewScreen(
-                    ride: Map<String, dynamic>.from(ride),
-                    rideName: rideName,
-                  ),
-                ));
-              },
-            ),
-            const SizedBox(height: 8),
-            _rideMenuItem(
-              icon: Icons.delete_outline,
-              iconColor: Colors.red,
-              title: 'Supprimer la sortie',
-              titleColor: Colors.red,
-              onTap: () async {
-                Navigator.pop(sheetCtx);
-                await deleteRide(context, ride, rideKey);
-              },
-            ),
-            const SizedBox(height: 4),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  // Badge neutre (charcoal) superposé à la miniature : icône + nombre.
-  // Couleur volontairement non connotée activité (ni orange, ni bleu).
-  Widget _thumbBadge(IconData icon, int count) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-      decoration: BoxDecoration(
-        color: const Color(0xE61E2227), // anthracite semi-opaque
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: Colors.white24, width: 0.8),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 11, color: Colors.white70),
-        const SizedBox(width: 3),
-        Text(
-          '$count',
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
-            height: 1.0,
-          ),
-        ),
-      ]),
-    );
-  }
-
   // Centre le contenu tout en restant défilable, pour que le pull-to-refresh
   // fonctionne même quand la liste est vide.
   Widget _refreshableCenter({required Widget child}) {
@@ -849,44 +792,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       },
-    );
-  }
-
-  Widget _rideMenuItem({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    Color? titleColor,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2A2A),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(children: [
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              color: iconColor.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: iconColor, size: 20),
-          ),
-          const SizedBox(width: 14),
-          Text(
-            title,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-              color: titleColor ?? Colors.white,
-            ),
-          ),
-        ]),
-      ),
     );
   }
 
@@ -938,7 +843,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
-      body: Padding(
+      body: SafeArea(
+        top: false,
+        child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
@@ -1202,6 +1109,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                     }
 
+                    final hasTags = wpCount > 0 ||
+                        photoCount > 0 ||
+                        (ride['department'] ?? '').toString().isNotEmpty ||
+                        (ride['region'] ?? '').toString().isNotEmpty ||
+                        (ride['city'] ?? '').toString().isNotEmpty;
+
                     return Dismissible(
                       key: ValueKey(rideKey),
                       direction: DismissDirection.endToStart,
@@ -1254,13 +1167,10 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: const Color(0xFF1B1B1B),
                               borderRadius: BorderRadius.circular(20),
                             ),
-                            child: Column(
+                            child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    // ── Bloc date ──
+                                // ── Bloc date ──
                                     SizedBox(
                                       width: 44,
                                       child: Column(
@@ -1327,23 +1237,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                     ),
                                     const SizedBox(width: 10),
-                                    // ── Miniature trace + badges WP / photos ──
-                                    Stack(
-                                      children: [
-                                        RideTraceThumbnail(points: ride['points'] ?? []),
-                                        if (wpCount > 0)
-                                          Positioned(
-                                            top: 5,
-                                            left: 5,
-                                            child: _thumbBadge(Icons.place, wpCount),
-                                          ),
-                                        if (photoCount > 0)
-                                          Positioned(
-                                            bottom: 5,
-                                            left: 5,
-                                            child: _thumbBadge(Icons.photo_camera, photoCount),
-                                          ),
-                                      ],
+                                    // ── Miniature trace ──
+                                    RideTraceThumbnail(
+                                      points: ride['points'] ?? [],
+                                      width: 96,
+                                      height: 84,
                                     ),
                                     const SizedBox(width: 12),
                                     // ── Titre + stats ──
@@ -1361,7 +1259,16 @@ class _HomeScreenState extends State<HomeScreen> {
                                               color: Colors.white,
                                             ),
                                           ),
-                                          const SizedBox(height: 5),
+                                          const SizedBox(height: 7),
+                                          // Pratique : information essentielle,
+                                          // remontée sous le titre au niveau des
+                                          // stats (durée / distance).
+                                          Align(
+                                            alignment: Alignment.centerLeft,
+                                            child: buildPracticeTag(
+                                                practiceKey, rideKey, ridesBox),
+                                          ),
+                                          const SizedBox(height: 7),
                                           Row(
                                             children: [
                                               const Icon(Icons.timer, size: 14, color: Colors.white60),
@@ -1412,20 +1319,71 @@ class _HomeScreenState extends State<HomeScreen> {
                                               ],
                                             ),
                                           ],
+                                          if (hasTags) ...[
+                                            const SizedBox(height: 10),
+                                            Wrap(
+                                              spacing: 6,
+                                              runSpacing: 6,
+                                              children: [
+                                                if (wpCount > 0)
+                                                  buildCountTag(Icons.place, wpCount, 'WP'),
+                                                if (photoCount > 0)
+                                                  buildCountTag(Icons.photo_camera, photoCount,
+                                                      photoCount > 1 ? 'photos' : 'photo'),
+                                                if ((ride['department'] ?? '').toString().isNotEmpty)
+                                                  buildTag('#${ride['department']}'),
+                                                if ((ride['region'] ?? '').toString().isNotEmpty)
+                                                  buildTag('#${ride['region']}'),
+                                                if ((ride['city'] ?? '').toString().isNotEmpty)
+                                                  buildTag('#${ride['city']}'),
+                                              ],
+                                            ),
+                                          ],
                                         ],
                                       ),
                                     ),
                                     const SizedBox(width: 2),
-                                    GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onTap: () => _showRideQuickMenu(
-                                        context: context,
-                                        ride: ride,
-                                        rideKey: rideKey,
-                                        rideName: (ride['name'] as String?) ?? departureTime,
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.only(left: 4, top: 2),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 4, top: 2),
+                                      child: PopupMenuButton<String>(
+                                        tooltip: 'Actions',
+                                        color: const Color(0xFF1A1A1A),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(14),
+                                        ),
+                                        position: PopupMenuPosition.under,
+                                        onSelected: (value) async {
+                                          if (value == 'share') {
+                                            Navigator.push(context, MaterialPageRoute(
+                                              builder: (_) => RideSharePreviewScreen(
+                                                ride: Map<String, dynamic>.from(ride),
+                                                rideName: (ride['name'] as String?) ?? departureTime,
+                                              ),
+                                            ));
+                                          } else if (value == 'delete') {
+                                            await deleteRide(context, ride, rideKey);
+                                          }
+                                        },
+                                        itemBuilder: (_) => [
+                                          const PopupMenuItem<String>(
+                                            value: 'share',
+                                            child: Row(children: [
+                                              Icon(Icons.image_outlined, color: Colors.purple, size: 20),
+                                              SizedBox(width: 12),
+                                              Text('Partager un résumé',
+                                                  style: TextStyle(color: Colors.white)),
+                                            ]),
+                                          ),
+                                          const PopupMenuItem<String>(
+                                            value: 'delete',
+                                            child: Row(children: [
+                                              Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                                              SizedBox(width: 12),
+                                              Text('Supprimer la sortie',
+                                                  style: TextStyle(color: Colors.red)),
+                                            ]),
+                                          ),
+                                        ],
                                         child: Container(
                                           width: 36,
                                           height: 36,
@@ -1440,22 +1398,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 12),
-                                Wrap(
-                                  spacing: 6,
-                                  runSpacing: 6,
-                                  children: [
-                                    buildPracticeTag(practiceKey, rideKey, ridesBox),
-                                    if ((ride['department'] ?? '').toString().isNotEmpty)
-                                      buildTag('#${ride['department']}'),
-                                    if ((ride['region'] ?? '').toString().isNotEmpty)
-                                      buildTag('#${ride['region']}'),
-                                    if ((ride['city'] ?? '').toString().isNotEmpty)
-                                      buildTag('#${ride['city']}'),
-                                  ],
-                                ),
-                              ],
-                            ),
                           ),
                         ),
                       ),
@@ -1540,12 +1482,13 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Text(
                 appVersion,
                 style: const TextStyle(
-                  fontSize: 10,
-                  color: Colors.white38,
+                  fontSize: 11,
+                  color: Colors.white60,
                 ),
               ),
             ),
           ],
+        ),
         ),
       ),
     );

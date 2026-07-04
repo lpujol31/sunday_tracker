@@ -14,6 +14,7 @@ import 'package:share_plus/share_plus.dart';
 import '../services/share_image_service.dart';
 import '../services/photo_sync_service.dart';
 import '../utils/date_labels.dart';
+import '../utils/geo_labels.dart';
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
@@ -244,6 +245,8 @@ class _RideScreenState extends State<RideScreen> {
   // ── Carte ──────────────────────────────────────────────────────
   static const String _prefKeyMapStyle = 'ride_map_style_index';
   static const String _prefKeyMapCollapsed = 'ride_map_collapsed';
+  static const String _prefKeyLastShare = 'ride_last_share_link';
+  static const String _prefKeyNotifyProches = 'ride_notify_proches';
   int _mapStyleIndex = 0;
   bool _mapFullscreen = false;
   bool _mapCollapsed = false;
@@ -1750,8 +1753,82 @@ class _RideScreenState extends State<RideScreen> {
     await startTracking();
   }
 
+  /// Une option de l'écran « Démarrer la sortie ».
+  /// [primary] = true → style vert primaire (dernier choix mémorisé) ;
+  /// false → style sombre secondaire.
+  Widget _buildStartOption({
+    required bool primary,
+    required Color accent,
+    required IconData icon,
+    required double iconSize,
+    required String title,
+    required String subtitle,
+    required bool loading,
+    required VoidCallback onTap,
+  }) {
+    return Opacity(
+      opacity: loading ? 0.4 : 1.0,
+      child: GestureDetector(
+        onTap: loading ? null : onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            gradient: primary
+                ? const LinearGradient(
+                    colors: [Color(0xFF00C853), Color(0xFF00897B)],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  )
+                : null,
+            color: primary ? null : const Color(0xFF2A2A2A),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: primary
+                      ? Colors.white.withValues(alpha: 0.2)
+                      : accent.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon,
+                    color: primary ? Colors.white : accent, size: iconSize),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white)),
+                    Text(subtitle,
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: primary ? Colors.white70 : Colors.white54)),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right,
+                  color: primary ? Colors.white54 : Colors.white24),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showStartRideSheet() async {
     bool loading = false;
+    final prefs = await SharedPreferences.getInstance();
+    // Dernier choix mémorisé : true = « Partager et démarrer » (défaut).
+    final bool sharePrimary = prefs.getBool(_prefKeyLastShare) ?? true;
+    if (!mounted) return;
     await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -1786,96 +1863,36 @@ class _RideScreenState extends State<RideScreen> {
                 style: TextStyle(fontSize: 14, color: Colors.white54),
               ),
               const SizedBox(height: 20),
-              Opacity(
-                opacity: loading ? 0.4 : 1.0,
-                child: GestureDetector(
-                  onTap: loading ? null : () async {
-                    setSheetState(() => loading = true);
-                    Navigator.pop(ctx);
-                    await startRide(shareLink: true);
-                  },
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF00C853), Color(0xFF00897B)],
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 36, height: 36,
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.2),
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.share_location, color: Colors.white, size: 18),
-                        ),
-                        const SizedBox(width: 14),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('Partager et démarrer',
-                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
-                              Text('Envoie le lien de suivi à tes proches',
-                                style: TextStyle(fontSize: 12, color: Colors.white70)),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right, color: Colors.white54),
-                      ],
-                    ),
-                  ),
-                ),
+              _buildStartOption(
+                primary: sharePrimary,
+                accent: const Color(0xFF00C853),
+                icon: Icons.share_location,
+                iconSize: 18,
+                title: 'Partager et démarrer',
+                subtitle: 'Envoie le lien de suivi à tes proches',
+                loading: loading,
+                onTap: () async {
+                  setSheetState(() => loading = true);
+                  Navigator.pop(ctx);
+                  await prefs.setBool(_prefKeyLastShare, true);
+                  await startRide(shareLink: true);
+                },
               ),
               const SizedBox(height: 10),
-              Opacity(
-                opacity: loading ? 0.4 : 1.0,
-                child: GestureDetector(
-                  onTap: loading ? null : () async {
-                    setSheetState(() => loading = true);
-                    Navigator.pop(ctx);
-                    await startRide(shareLink: false);
-                  },
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF2A2A2A),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 36, height: 36,
-                          decoration: BoxDecoration(
-                            color: Colors.blue.withValues(alpha: 0.15),
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.play_arrow_rounded, color: Colors.blue, size: 20),
-                        ),
-                        const SizedBox(width: 14),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('Démarrer sans partager',
-                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
-                              Text("Le lien reste dispo dans l'écran ride",
-                                style: TextStyle(fontSize: 12, color: Colors.white54)),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right, color: Colors.white24),
-                      ],
-                    ),
-                  ),
-                ),
+              _buildStartOption(
+                primary: !sharePrimary,
+                accent: Colors.blue,
+                icon: Icons.play_arrow_rounded,
+                iconSize: 20,
+                title: 'Démarrer sans partager',
+                subtitle: "Le lien reste dispo dans l'écran ride",
+                loading: loading,
+                onTap: () async {
+                  setSheetState(() => loading = true);
+                  Navigator.pop(ctx);
+                  await prefs.setBool(_prefKeyLastShare, false);
+                  await startRide(shareLink: false);
+                },
               ),
             ],
           ),
@@ -2256,7 +2273,11 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> _showExitRideModal() async {
     final nav = Navigator.of(context);
-    bool notifyProches = safetyShareCode != null;
+    final prefs = await SharedPreferences.getInstance();
+    // Dernier état mémorisé (défaut : coché si un lien de suivi est actif).
+    bool notifyProches =
+        prefs.getBool(_prefKeyNotifyProches) ?? (safetyShareCode != null);
+    if (!mounted) return;
     await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -2298,7 +2319,10 @@ class _RideScreenState extends State<RideScreen> {
               ),
               const SizedBox(height: 24),
               GestureDetector(
-                onTap: () => setSheetState(() => notifyProches = !notifyProches),
+                onTap: () {
+                  setSheetState(() => notifyProches = !notifyProches);
+                  prefs.setBool(_prefKeyNotifyProches, notifyProches);
+                },
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -2349,6 +2373,7 @@ class _RideScreenState extends State<RideScreen> {
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: () async {
+                    await prefs.setBool(_prefKeyNotifyProches, notifyProches);
                     if (notifyProches) await _shareRideEnd();
                     await saveRide();
                     if (!mounted) return;
@@ -2640,6 +2665,8 @@ class _RideScreenState extends State<RideScreen> {
       'city': locationTags['city'],
       'department': locationTags['department'],
       'region': locationTags['region'],
+      'startCity': locationTags['startCity'],
+      'endCity': locationTags['endCity'],
       'safetySessionId': safetySessionId,
       'safetyShareCode': safetyShareCode,
       'points': _pointsWithAlt,
@@ -2924,22 +2951,38 @@ class _RideScreenState extends State<RideScreen> {
   }
 
   Future<Map<String, String>> getRideLocationTags() async {
-    if (ridePoints.isEmpty) return {'city': '', 'department': '', 'region': ''};
+    if (ridePoints.isEmpty) {
+      return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
+    }
     try {
       final placemarks = await placemarkFromCoordinates(
         ridePoints.first.latitude,
         ridePoints.first.longitude,
       );
-      if (placemarks.isEmpty)
-        return {'city': '', 'department': '', 'region': ''};
+      if (placemarks.isEmpty) {
+        return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
+      }
       final place = placemarks.first;
+      final startCity = cityFromPlacemark(place);
+      // Ville d'arrivée : géocode le dernier point (peut être identique au départ
+      // sur une boucle). En cas d'échec on retombe sur la ville de départ.
+      String endCity = startCity;
+      try {
+        final endMarks = await placemarkFromCoordinates(
+          ridePoints.last.latitude,
+          ridePoints.last.longitude,
+        );
+        if (endMarks.isNotEmpty) endCity = cityFromPlacemark(endMarks.first);
+      } catch (_) {}
       return {
-        'city': place.locality ?? '',
+        'city': startCity,
         'department': place.subAdministrativeArea ?? '',
         'region': place.administrativeArea ?? '',
+        'startCity': startCity,
+        'endCity': endCity,
       };
     } catch (_) {
-      return {'city': '', 'department': '', 'region': ''};
+      return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
     }
   }
 
