@@ -72,6 +72,18 @@ const Map<String, Map<String, dynamic>> kPracticeTypes = {
 //   avgSpeed >= 20 ET slopeRatio < 30       → autre
 //   fallback                                 → vtt
 
+/// Charge utile légère écrite dans `safety_sessions.ride_json` : uniquement ce
+/// que le viewer web lit (trace dense, waypoints, stats). Évite de dupliquer la
+/// sortie entière (météo, notes, ville…) — moins de volume, et surtout moins
+/// d'exposition via le `share_code` partagé aux proches. La sortie complète vit
+/// dans la table `rides`.
+Map<String, dynamic> liveSessionRideJson(Map ride) => {
+      'points': ride['points'],
+      'waypoints': ride['waypoints'],
+      'distanceMeters': ride['distanceMeters'],
+      'durationSeconds': ride['durationSeconds'],
+    };
+
 String detectPractice(Map ride) {
   final distanceM = (ride['distanceMeters'] ?? 0).toDouble();
   final durationS = (ride['durationSeconds'] ?? 1).toDouble();
@@ -278,7 +290,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (sessionId != null) {
         await Supabase.instance.client
             .from('safety_sessions')
-            .update({'ride_json': ride})
+            .update({'ride_json': liveSessionRideJson(ride)})
             .eq('id', sessionId);
       }
     } catch (e) {
@@ -315,17 +327,13 @@ class _HomeScreenState extends State<HomeScreen> {
         final sessionId = session['id'];
         final startedAt = session['started_at'] as String;
 
-        // Chemin rapide : ride_json complet déjà stocké dans la session
-        if (session['ride_json'] is Map) {
-          final rideMap = Map<String, dynamic>.from(
-              (session['ride_json'] as Map).cast<String, dynamic>());
-          await box.add(rideMap);
-          _syncRide(rideMap);
-          recovered++;
-          continue;
-        }
-
-        // Fallback : reconstruction depuis les positions GPS
+        // Les sorties complètes sont restaurées depuis la table `rides`
+        // (_autoRestoreFromRidesTable). Ici on reconstruit depuis les positions
+        // GPS, pour les sessions jamais sauvegardées (ex. crash en cours de sortie).
+        // safety_sessions.ride_json ne contient plus qu'une charge allégée
+        // (points + waypoints), pas la sortie entière.
+        final lightRideJson =
+            session['ride_json'] is Map ? session['ride_json'] as Map : null;
         final positions = await client
             .from('safety_positions')
             .select()
@@ -423,6 +431,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'safetySessionId': sessionId,
           'safetyShareCode': session['share_code'],
           'points': points,
+          'waypoints': lightRideJson?['waypoints'],
           'city': city,
           'department': department,
           'region': region,
@@ -795,6 +804,60 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Menu ⋮ d'une carte (partager / supprimer). Extrait pour être réutilisé par
+  // la carte téléphone sans dupliquer le bloc de la carte tablette.
+  Widget _buildRideMenu(
+      BuildContext context, Map ride, dynamic rideKey, String departureTime) {
+    return PopupMenuButton<String>(
+      tooltip: 'Actions',
+      color: const Color(0xFF1A1A1A),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+      ),
+      position: PopupMenuPosition.under,
+      onSelected: (value) async {
+        if (value == 'share') {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => RideSharePreviewScreen(
+              ride: Map<String, dynamic>.from(ride),
+              rideName: (ride['name'] as String?) ?? departureTime,
+            ),
+          ));
+        } else if (value == 'delete') {
+          await deleteRide(context, ride, rideKey);
+        }
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem<String>(
+          value: 'share',
+          child: Row(children: [
+            Icon(Icons.image_outlined, color: Colors.purple, size: 20),
+            SizedBox(width: 12),
+            Text('Partager un résumé', style: TextStyle(color: Colors.white)),
+          ]),
+        ),
+        const PopupMenuItem<String>(
+          value: 'delete',
+          child: Row(children: [
+            Icon(Icons.delete_outline, color: Colors.red, size: 20),
+            SizedBox(width: 12),
+            Text('Supprimer la sortie', style: TextStyle(color: Colors.red)),
+          ]),
+        ),
+      ],
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: const Color(0xFF232323),
+          border: Border.all(color: Colors.white24, width: 1),
+        ),
+        child: const Icon(Icons.more_vert, color: Colors.white70, size: 20),
+      ),
+    );
+  }
+
   // -------------------------------------------------------------------------
   // BUILD
   // -------------------------------------------------------------------------
@@ -803,6 +866,27 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final ridesBox = _ridesBox;
     if (ridesBox == null) return const Scaffold(backgroundColor: Color(0xFF0D0D0D));
+
+    // Adaptation aux petits écrans : les valeurs de référence (tablette /
+    // téléphone large) restent inchangées ; on ne réduit que sous ces seuils
+    // pour éviter les débordements sur téléphones étroits.
+    final screenW = MediaQuery.of(context).size.width;
+    final isNarrow = screenW < 380;
+    final isVeryNarrow = screenW < 340;
+
+    // Miniature de trace : dimensionnée à partir de la largeur réellement
+    // disponible dans la carte, en réservant un minimum pour la colonne
+    // titre / stats. Sur téléphone étroit elle rétrécit (jusqu'à 64 px) ; sur
+    // écran large / tablette elle reste à sa taille de référence (96 px).
+    final cardInnerW = screenW - 60; // 32 padding page + 28 padding carte
+    final double thumbW =
+        (cardInnerW - 44 - 40 - 24 - 130).clamp(64.0, 96.0);
+    final double thumbH = thumbW * 84 / 96;
+
+    // Sur téléphone (< 600 dp, breakpoint tablette Material), les étiquettes
+    // sont sorties de la colonne étroite pour occuper toute la largeur de la
+    // carte sur une ligne dédiée. Sur tablette, on garde l'affichage inline.
+    final tagsFullWidth = screenW < 600;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
@@ -887,27 +971,30 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Row(
                     children: [
-                      const Text(
-                        'Prêt pour une\nnouvelle aventure ?',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          height: 1.45,
-                          letterSpacing: -1,
+                      Flexible(
+                        child: Text(
+                          'Prêt pour une\nnouvelle aventure ?',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: isNarrow ? 13 : 15,
+                            height: 1.45,
+                            letterSpacing: -1,
+                          ),
                         ),
                       ),
                       Container(
                         width: 1,
                         height: 38,
-                        margin: const EdgeInsets.symmetric(horizontal: 12),
+                        margin: EdgeInsets.symmetric(
+                            horizontal: isNarrow ? 8 : 12),
                         color: Colors.white.withValues(alpha: 0.45),
                       ),
-                      const Expanded(
+                      Expanded(
                         child: Text(
                           'DÉMARRER',
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 23,
+                            fontSize: isVeryNarrow ? 18 : (isNarrow ? 20 : 23),
                             fontWeight: FontWeight.w900,
                             letterSpacing: -0.5,
                           ),
@@ -1115,6 +1202,45 @@ class _HomeScreenState extends State<HomeScreen> {
                         (ride['region'] ?? '').toString().isNotEmpty ||
                         (ride['city'] ?? '').toString().isNotEmpty;
 
+                    // Étiquettes (WP / photos / lieux), construites une fois et
+                    // affichées soit inline dans la colonne (tablette), soit
+                    // sur une ligne pleine largeur sous la carte (téléphone).
+                    final tagChildren = <Widget>[
+                      if (wpCount > 0)
+                        buildCountTag(Icons.place, wpCount, 'WP'),
+                      if (photoCount > 0)
+                        buildCountTag(Icons.photo_camera, photoCount,
+                            photoCount > 1 ? 'photos' : 'photo'),
+                      if ((ride['department'] ?? '').toString().isNotEmpty)
+                        buildTag('#${ride['department']}'),
+                      if ((ride['region'] ?? '').toString().isNotEmpty)
+                        buildTag('#${ride['region']}'),
+                      if ((ride['city'] ?? '').toString().isNotEmpty)
+                        buildTag('#${ride['city']}'),
+                    ];
+
+                    // Icône du moment de la journée (lune / soleil), déduite de
+                    // l'heure de départ — utilisée par la carte téléphone.
+                    final startHour = startDate.hour;
+                    final IconData momentIcon;
+                    final Color momentColor;
+                    if (startHour < 6 || startHour >= 21) {
+                      momentIcon = Icons.nightlight_round;
+                      momentColor = const Color(0xFFA855F7);
+                    } else if (startHour >= 18) {
+                      momentIcon = Icons.wb_twilight;
+                      momentColor = const Color(0xFFFB923C);
+                    } else {
+                      momentIcon = Icons.wb_sunny;
+                      momentColor = const Color(0xFFFBBF24);
+                    }
+
+                    // Durée compacte pour la carte téléphone : « 0:17:37 » → « 17:37 ».
+                    var durCompact = formatDuration(ride['durationSeconds']);
+                    if (durCompact.startsWith('0:')) {
+                      durCompact = durCompact.substring(2);
+                    }
+
                     return Dismissible(
                       key: ValueKey(rideKey),
                       direction: DismissDirection.endToStart,
@@ -1167,9 +1293,162 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: const Color(0xFF1B1B1B),
                               borderRadius: BorderRadius.circular(20),
                             ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
+                            child: tagsFullWidth
+                                // ────────────────────────────────────────────
+                                // CARTE TÉLÉPHONE (proposition 2A) : titre en
+                                // haut pleine largeur, grande carte encadrée par
+                                // la date et l'icône du moment, stats + pratique
+                                // sur une ligne, étiquettes pleine largeur.
+                                // ────────────────────────────────────────────
+                                ? Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      // ── Titre + menu ──
+                                      Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              ride['name'] ?? departureTime,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          _buildRideMenu(
+                                              context, ride, rideKey, departureTime),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      // ── Date · grande carte · moment ──
+                                      Row(
+                                        crossAxisAlignment: CrossAxisAlignment.center,
+                                        children: [
+                                          SizedBox(
+                                            width: 44,
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  '${startDate.day}',
+                                                  style: const TextStyle(
+                                                    fontSize: 34,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: Colors.white,
+                                                    height: 1.0,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  monthStr,
+                                                  style: const TextStyle(
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: Colors.white70,
+                                                    letterSpacing: 0.5,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  '${startDate.year}',
+                                                  style: const TextStyle(
+                                                    fontSize: 11,
+                                                    color: Colors.white54,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Container(
+                                              width: 1, height: 84, color: Colors.white12),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: RideTraceThumbnail(
+                                              points: ride['points'] ?? [],
+                                              width: double.infinity,
+                                              height: 118,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Icon(momentIcon, color: momentColor, size: 30),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      // ── Stats · pratique ──
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Wrap(
+                                              spacing: 10,
+                                              runSpacing: 4,
+                                              crossAxisAlignment: WrapCrossAlignment.center,
+                                              children: [
+                                                Row(mainAxisSize: MainAxisSize.min, children: [
+                                                  const Icon(Icons.flag, size: 14, color: Colors.white60),
+                                                  const SizedBox(width: 4),
+                                                  Text(departureTime, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                                                ]),
+                                                Row(mainAxisSize: MainAxisSize.min, children: [
+                                                  const Icon(Icons.timer, size: 14, color: Colors.white60),
+                                                  const SizedBox(width: 4),
+                                                  Text(durCompact, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                                                ]),
+                                                Row(mainAxisSize: MainAxisSize.min, children: [
+                                                  const Icon(Icons.route, size: 14, color: Colors.white60),
+                                                  const SizedBox(width: 4),
+                                                  Text(formatDistance(ride['distanceMeters']), style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                                                ]),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          buildPracticeTag(practiceKey, rideKey, ridesBox),
+                                        ],
+                                      ),
+                                      if ((ride['note'] ?? '').toString().isNotEmpty) ...[
+                                        const SizedBox(height: 8),
+                                        Row(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            const Icon(Icons.edit_note_rounded, size: 16, color: Colors.orange),
+                                            const SizedBox(width: 4),
+                                            Expanded(
+                                              child: Text(
+                                                (ride['note'] as String).trim(),
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.orange,
+                                                  fontStyle: FontStyle.italic,
+                                                  height: 1.4,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                      if (hasTags) ...[
+                                        const SizedBox(height: 12),
+                                        Wrap(
+                                          spacing: 6,
+                                          runSpacing: 6,
+                                          children: tagChildren,
+                                        ),
+                                      ],
+                                    ],
+                                  )
+                                // ────────────────────────────────────────────
+                                // CARTE TABLETTE — inchangée.
+                                // ────────────────────────────────────────────
+                                : Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
                                 // ── Bloc date ──
                                     SizedBox(
                                       width: 44,
@@ -1240,8 +1519,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                     // ── Miniature trace ──
                                     RideTraceThumbnail(
                                       points: ride['points'] ?? [],
-                                      width: 96,
-                                      height: 84,
+                                      width: thumbW,
+                                      height: thumbH,
                                     ),
                                     const SizedBox(width: 12),
                                     // ── Titre + stats ──
@@ -1269,29 +1548,41 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 practiceKey, rideKey, ridesBox),
                                           ),
                                           const SizedBox(height: 7),
-                                          Row(
+                                          // Durée + distance : en Wrap pour que
+                                          // la distance passe à la ligne plutôt
+                                          // que d'être tronquée sur écran étroit.
+                                          Wrap(
+                                            spacing: 8,
+                                            runSpacing: 4,
+                                            crossAxisAlignment: WrapCrossAlignment.center,
                                             children: [
-                                              const Icon(Icons.timer, size: 14, color: Colors.white60),
-                                              const SizedBox(width: 1),
-                                              Text(
-                                                formatDuration(ride['durationSeconds']),
-                                                style: const TextStyle(
-                                                  fontSize: 13,
-                                                  color: Colors.white70,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 5),
-                                              const Icon(Icons.route, size: 14, color: Colors.white60),
-                                              const SizedBox(width: 1),
-                                              Flexible(
-                                                child: Text(
-                                                  formatDistance(ride['distanceMeters']),
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 13,
-                                                    color: Colors.white70,
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  const Icon(Icons.timer, size: 14, color: Colors.white60),
+                                                  const SizedBox(width: 2),
+                                                  Text(
+                                                    formatDuration(ride['durationSeconds']),
+                                                    style: const TextStyle(
+                                                      fontSize: 13,
+                                                      color: Colors.white70,
+                                                    ),
                                                   ),
-                                                ),
+                                                ],
+                                              ),
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  const Icon(Icons.route, size: 14, color: Colors.white60),
+                                                  const SizedBox(width: 2),
+                                                  Text(
+                                                    formatDistance(ride['distanceMeters']),
+                                                    style: const TextStyle(
+                                                      fontSize: 13,
+                                                      color: Colors.white70,
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ],
                                           ),
@@ -1319,24 +1610,15 @@ class _HomeScreenState extends State<HomeScreen> {
                                               ],
                                             ),
                                           ],
-                                          if (hasTags) ...[
+                                          // Tablette : étiquettes inline dans
+                                          // la colonne. Téléphone : rendues plus
+                                          // bas, pleine largeur.
+                                          if (hasTags && !tagsFullWidth) ...[
                                             const SizedBox(height: 10),
                                             Wrap(
                                               spacing: 6,
                                               runSpacing: 6,
-                                              children: [
-                                                if (wpCount > 0)
-                                                  buildCountTag(Icons.place, wpCount, 'WP'),
-                                                if (photoCount > 0)
-                                                  buildCountTag(Icons.photo_camera, photoCount,
-                                                      photoCount > 1 ? 'photos' : 'photo'),
-                                                if ((ride['department'] ?? '').toString().isNotEmpty)
-                                                  buildTag('#${ride['department']}'),
-                                                if ((ride['region'] ?? '').toString().isNotEmpty)
-                                                  buildTag('#${ride['region']}'),
-                                                if ((ride['city'] ?? '').toString().isNotEmpty)
-                                                  buildTag('#${ride['city']}'),
-                                              ],
+                                              children: tagChildren,
                                             ),
                                           ],
                                         ],

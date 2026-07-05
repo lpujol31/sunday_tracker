@@ -2698,7 +2698,7 @@ class _RideScreenState extends State<RideScreen> {
           .update({
             'status': 'finished',
             'ended_at': DateTime.now().toUtc().toIso8601String(),
-            'ride_json': rideData,
+            'ride_json': liveSessionRideJson(rideData),
           })
           .eq('id', safetySessionId!);
     }
