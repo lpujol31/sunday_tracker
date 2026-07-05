@@ -2250,9 +2250,14 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> createSafetySession() async {
     final shareCode = generateShareCode();
+    final userId = Supabase.instance.client.auth.currentUser?.id;
     final response = await Supabase.instance.client
         .from('safety_sessions')
-        .insert({'share_code': shareCode, 'status': 'in_progress'})
+        .insert({
+          'share_code': shareCode,
+          'status': 'in_progress',
+          'user_id': userId,
+        })
         .select()
         .single();
     safetySessionId = response['id'];
