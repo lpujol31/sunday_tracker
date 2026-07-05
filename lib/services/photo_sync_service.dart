@@ -161,10 +161,14 @@ Future<void> syncPendingPhotos() async {
 
       for (final wp in waypoints) {
         if (wp is! Map) continue;
-        final photos = wp['photos'] as List?;
-        if (photos == null) continue;
-        for (var i = 0; i < photos.length; i++) {
-          final n = normalizePhoto(photos[i]);
+        final rawPhotos = wp['photos'] as List?;
+        if (rawPhotos == null) continue;
+        // Normalise toute la liste (l'ancien format stockait des String) : on ne
+        // peut pas réécrire une Map dans une List<String> figée par Hive, donc on
+        // travaille sur une liste neuve de maps qu'on réaffecte à la fin.
+        final photos = rawPhotos.map(normalizePhoto).toList();
+        var wpChanged = false;
+        for (final n in photos) {
           if (n['url'] != null) continue; // déjà uploadée
           final local = n['local'] as String?;
           if (local == null || !File(local).existsSync()) continue; // rien à envoyer
@@ -172,13 +176,16 @@ Future<void> syncPendingPhotos() async {
             final url = await _uploadOne(userId, rideId, local);
             if (url != null) {
               n['url'] = url;
-              photos[i] = n; // remplace String/ancienne map par la map normalisée
-              changed = true;
+              wpChanged = true;
             }
           } catch (e) {
             debugPrint('[PHOTO_SYNC] upload $local: $e');
             // on continue, on retentera plus tard
           }
+        }
+        if (wpChanged) {
+          wp['photos'] = photos; // remplace par la liste normalisée (List<Map>)
+          changed = true;
         }
       }
 
