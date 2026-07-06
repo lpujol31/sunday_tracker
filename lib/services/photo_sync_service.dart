@@ -196,12 +196,32 @@ Future<void> syncPendingPhotos() async {
             {'user_id': userId, 'started_at': rideId, 'ride_json': ride},
             onConflict: 'user_id,started_at',
           );
-          // Re-pousse la charge live allégée : sans ça, safety_sessions.ride_json
-          // reste figé à sa valeur du finish (photos `url: null`) et les photos
-          // fraîchement uploadées n'atteignent JAMAIS le viewer web (qui ne lit
-          // que la session, pas la table `rides`). Miroir de liveSessionRideJson().
-          final sessionId = ride['safetySessionId'] as String?;
-          if (sessionId != null) {
+        } catch (e) {
+          debugPrint('[PHOTO_SYNC] upsert ride $rideId: $e');
+        }
+      }
+
+      // Re-pousse la charge live allegee vers safety_sessions. Sans ca, le
+      // ride_json de la session reste fige a sa valeur du finish (photos
+      // url: null) et les photos n'atteignent JAMAIS le viewer web (qui ne lit
+      // QUE la session, pas la table rides). On le fait :
+      //   - quand de nouvelles photos viennent d'etre uploadees (changed), OU
+      //   - quand des photos deja uploadees n'ont jamais ete propagees a la
+      //     session (sorties d'avant ce correctif) — marqueur wpLiveSynced pour
+      //     ne le faire qu'une seule fois.
+      // Miroir de liveSessionRideJson().
+      final sessionId = ride['safetySessionId'] as String?;
+      if (sessionId != null) {
+        var hasUploadedPhoto = false;
+        for (final wp in waypoints) {
+          if (wp is! Map) continue;
+          for (final p in (wp['photos'] as List? ?? const [])) {
+            if (photoUrl(p) != null) { hasUploadedPhoto = true; break; }
+          }
+          if (hasUploadedPhoto) break;
+        }
+        if (hasUploadedPhoto && (changed || ride['wpLiveSynced'] != true)) {
+          try {
             await client.from('safety_sessions').update({
               'ride_json': {
                 'points': ride['points'],
@@ -210,9 +230,11 @@ Future<void> syncPendingPhotos() async {
                 'durationSeconds': ride['durationSeconds'],
               },
             }).eq('id', sessionId);
+            ride['wpLiveSynced'] = true;
+            await box.put(key, ride);
+          } catch (e) {
+            debugPrint('[PHOTO_SYNC] refresh session $rideId: $e');
           }
-        } catch (e) {
-          debugPrint('[PHOTO_SYNC] upsert ride $rideId: $e');
         }
       }
     }
