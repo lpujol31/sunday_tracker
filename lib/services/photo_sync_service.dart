@@ -196,6 +196,21 @@ Future<void> syncPendingPhotos() async {
             {'user_id': userId, 'started_at': rideId, 'ride_json': ride},
             onConflict: 'user_id,started_at',
           );
+          // Re-pousse la charge live allégée : sans ça, safety_sessions.ride_json
+          // reste figé à sa valeur du finish (photos `url: null`) et les photos
+          // fraîchement uploadées n'atteignent JAMAIS le viewer web (qui ne lit
+          // que la session, pas la table `rides`). Miroir de liveSessionRideJson().
+          final sessionId = ride['safetySessionId'] as String?;
+          if (sessionId != null) {
+            await client.from('safety_sessions').update({
+              'ride_json': {
+                'points': ride['points'],
+                'waypoints': ride['waypoints'],
+                'distanceMeters': ride['distanceMeters'],
+                'durationSeconds': ride['durationSeconds'],
+              },
+            }).eq('id', sessionId);
+          }
         } catch (e) {
           debugPrint('[PHOTO_SYNC] upsert ride $rideId: $e');
         }
