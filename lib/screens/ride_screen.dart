@@ -2234,6 +2234,7 @@ class _RideScreenState extends State<RideScreen> {
           'latitude': p['lat'],
           'longitude': p['lng'],
           'altitude': p['alt'],
+          if (p['ts'] != null) 'created_at': p['ts'],
         }).toList(),
       );
     } catch (e) {
@@ -2596,6 +2597,7 @@ class _RideScreenState extends State<RideScreen> {
               'latitude': p['lat'],
               'longitude': p['lng'],
               'altitude': p['alt'],
+              if (p['ts'] != null) 'created_at': p['ts'],
             }).toList(),
           );
           _uploadQueue.removeRange(0, chunk.length);
@@ -2778,6 +2780,10 @@ class _RideScreenState extends State<RideScreen> {
             'lat': position.latitude,
             'lng': position.longitude,
             'alt': position.altitude,
+            // Horodatage du fix GPS : sert de created_at à l'upload pour que
+            // l'« Arrivée » du live reflète l'heure réelle du point, pas
+            // l'heure d'envoi (cf. reliquat de file vidé au STOP après pause).
+            'ts': position.timestamp.toUtc().toIso8601String(),
           };
           _pointsWithAlt.add(gpsPoint);
           _uploadQueue.add(gpsPoint);
@@ -2949,6 +2955,7 @@ class _RideScreenState extends State<RideScreen> {
       'lat': pos.latitude,
       'lng': pos.longitude,
       'alt': pos.altitude,
+      'ts': pos.timestamp.toUtc().toIso8601String(),
     };
     _pointsWithAlt.add(gpsPoint);
     _uploadQueue.add(gpsPoint);
