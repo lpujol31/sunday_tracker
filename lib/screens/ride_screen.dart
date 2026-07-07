@@ -2273,7 +2273,7 @@ class _RideScreenState extends State<RideScreen> {
     if (safetyShareCode == null) return;
     final url = 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
     final message =
-        'Je démarre une sortie avec Sunday Tracker.\n\nTu peux consulter ma dernière position connue ici :\n\n$url';
+        'Je démarre une sortie avec Sunday Tracker.\nTu peux consulter ma dernière position connue ici :\n$url';
     await Share.share(message, subject: 'Sunday Tracker Safety Beacon');
   }
 
@@ -2470,7 +2470,10 @@ class _RideScreenState extends State<RideScreen> {
     return {
       'name':                    _customRideName ?? autoName,
       'startTime':               rideStartTime?.toUtc().toIso8601String(),
-      'endTime':                 DateTime.now().toUtc().toIso8601String(),
+      // Fin = début + durée active (et non l'heure du bouton STOP) : si on met
+      // en pause puis on arrête sans reprendre, DateTime.now() décalerait
+      // l'« Arrivée » de toute la pause finale. Cf. bug Arrivée faussée.
+      'endTime':                 (rideStartTime ?? DateTime.now()).add(rideDuration).toUtc().toIso8601String(),
       'durationSeconds':         rideDuration.inSeconds,
       'distanceMeters':          totalDistance,
       'totalElevationMeters':    _dPlus,
@@ -2652,7 +2655,9 @@ class _RideScreenState extends State<RideScreen> {
       'name': _customRideName ?? autoName,
       'note': _rideNote,
       'startTime': rideStartTime?.toUtc().toIso8601String(),
-      'endTime': DateTime.now().toUtc().toIso8601String(),
+      // Fin = début + durée active (pas l'heure du STOP) : exclut une pause
+      // finale non reprise. Cf. bug Arrivée faussée.
+      'endTime': (rideStartTime ?? DateTime.now()).add(rideDuration).toUtc().toIso8601String(),
       'durationSeconds': rideDuration.inSeconds,
       'distanceMeters': totalDistance,
       'totalElevationMeters': _dPlus,
