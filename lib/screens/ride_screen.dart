@@ -71,6 +71,7 @@ class _IsolatedMap extends StatelessWidget {
   final String longitude;
   final VoidCallback onMapReady;
   final void Function(MapEvent)? onMapEvent;
+  final void Function(Map<String, dynamic> wp, int number)? onWaypointTap;
 
   const _IsolatedMap({
     super.key,
@@ -84,6 +85,7 @@ class _IsolatedMap extends StatelessWidget {
     required this.longitude,
     required this.onMapReady,
     this.onMapEvent,
+    this.onWaypointTap,
   });
 
   @override
@@ -154,17 +156,147 @@ class _IsolatedMap extends StatelessWidget {
                 ),
               ),
             ),
-            ...rideWaypoints.map(
-              (wp) => Marker(
-                point: LatLng(wp['lat'] as double, wp['lng'] as double),
-                width: 36,
-                height: 36,
-                child: const Icon(Icons.place, color: Colors.blue, size: 36),
+            // Points de passage : même style que l'écran de détail — pastille
+            // numérotée excentrée perpendiculairement à la trace, reliée par un
+            // trait de rappel à un point posé sur la vraie position GPS.
+            for (final (i, wp) in rideWaypoints.indexed)
+              _waypointMarker(wp, i + 1),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // Barycentre du tracé : sert à décaler les pins vers l'EXTÉRIEUR de la boucle.
+  ({double lat, double lng}) _traceCentroid() {
+    if (ridePoints.isEmpty) return (lat: 0, lng: 0);
+    var sLat = 0.0, sLng = 0.0;
+    for (final p in ridePoints) {
+      sLat += p.latitude;
+      sLng += p.longitude;
+    }
+    return (lat: sLat / ridePoints.length, lng: sLng / ridePoints.length);
+  }
+
+  /// Direction unitaire (repère écran) PERPENDICULAIRE à la trace au niveau du
+  /// waypoint [at], pointant vers l'EXTÉRIEUR (loin du barycentre).
+  Offset _leaderDirection(LatLng at) {
+    final trace = ridePoints;
+    if (trace.length < 2) return const Offset(0, -1);
+    var nearest = 0;
+    var best = double.infinity;
+    for (var i = 0; i < trace.length; i++) {
+      final dLat = trace[i].latitude - at.latitude;
+      final dLng = trace[i].longitude - at.longitude;
+      final d = dLat * dLat + dLng * dLng;
+      if (d < best) {
+        best = d;
+        nearest = i;
+      }
+    }
+    final a = trace[max(0, nearest - 2)];
+    final b = trace[min(trace.length - 1, nearest + 2)];
+    final latRad = at.latitude * pi / 180;
+    final cosLat = cos(latRad);
+    final tx = (b.longitude - a.longitude) * cosLat;
+    final ty = -(b.latitude - a.latitude);
+    final tlen = sqrt(tx * tx + ty * ty);
+    if (tlen < 1e-12) return const Offset(0, -1);
+    var px = -ty / tlen;
+    var py = tx / tlen;
+    final c = _traceCentroid();
+    final outX = (at.longitude - c.lng) * cosLat;
+    final outY = -(at.latitude - c.lat);
+    if (outX * outX + outY * outY > 1e-12) {
+      if (px * outX + py * outY < 0) {
+        px = -px;
+        py = -py;
+      }
+    } else {
+      if (py > 1e-6) {
+        px = -px;
+        py = -py;
+      } else if (py.abs() <= 1e-6 && px < 0) {
+        px = -px;
+      }
+    }
+    return Offset(px, py);
+  }
+
+  /// Marker waypoint : pin flottant numéroté décalé perpendiculairement à la
+  /// trace, relié par une fine ligne à un point posé sur sa vraie position GPS.
+  Marker _waypointMarker(Map<String, dynamic> wp, int number) {
+    const color = Color(0xFF2563EB);
+    const lead = 30.0;
+    const box = 120.0;
+    const badge = 30.0;
+    final at = LatLng((wp['lat'] as num).toDouble(), (wp['lng'] as num).toDouble());
+    final dir = _leaderDirection(at);
+    final tip = Offset(dir.dx * lead, dir.dy * lead);
+    final angle = atan2(tip.dy, tip.dx);
+    return Marker(
+      point: at,
+      width: box,
+      height: box,
+      child: RepaintBoundary(
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Transform.translate(
+              offset: Offset(tip.dx / 2, tip.dy / 2),
+              child: Transform.rotate(
+                angle: angle,
+                child: Container(
+                  width: lead,
+                  height: 2,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(1),
+                  ),
+                ),
+              ),
+            ),
+            Container(
+              width: 9,
+              height: 9,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 1.5),
+              ),
+            ),
+            Transform.translate(
+              offset: tip,
+              child: GestureDetector(
+                onTap: onWaypointTap == null
+                    ? null
+                    : () => onWaypointTap!(wp, number),
+                child: Container(
+                  width: badge,
+                  height: badge,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withValues(alpha: 0.45), blurRadius: 4),
+                    ],
+                  ),
+                  child: Text('$number',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: number >= 10 ? 13 : 16,
+                      fontWeight: FontWeight.w800,
+                      height: 1,
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
         ),
-      ],
+      ),
     );
   }
 }
@@ -238,6 +370,9 @@ class _RideScreenState extends State<RideScreen> {
   String? _customRideName;
   String _rideNote = '';
 
+  // ── Pratique choisie au démarrage (null = détection auto) ───────
+  String? _selectedPractice;
+
   // ── Notifications ──────────────────────────────────────────────
   int _notificationCount = 0;
   final List<Map<String, dynamic>> _notifications = [];
@@ -247,6 +382,7 @@ class _RideScreenState extends State<RideScreen> {
   static const String _prefKeyMapCollapsed = 'ride_map_collapsed';
   static const String _prefKeyLastShare = 'ride_last_share_link';
   static const String _prefKeyNotifyProches = 'ride_notify_proches';
+  static const String _prefKeyLastPractice = 'ride_last_practice';
   int _mapStyleIndex = 0;
   bool _mapFullscreen = false;
   bool _mapCollapsed = false;
@@ -1823,11 +1959,64 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
-  Future<void> _showStartRideSheet() async {
-    bool loading = false;
+  Widget _practiceChip({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+  }) =>
+      GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          decoration: BoxDecoration(
+            color: selected
+                ? color.withValues(alpha: 0.18)
+                : const Color(0xFF2A2A2A),
+            borderRadius: BorderRadius.circular(30),
+            border: Border.all(
+              color: selected ? color : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 15, color: selected ? color : Colors.white54),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: selected ? Colors.white : Colors.white54,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Future<void> _saveLastPractice(String? key, SharedPreferences prefs) async {
+    if (key == null) {
+      await prefs.remove(_prefKeyLastPractice);
+    } else {
+      await prefs.setString(_prefKeyLastPractice, key);
+    }
+  }
+
+  // Métadonnées d'affichage de la pratique courante (null = détection auto).
+  (String, IconData, Color) _practiceMeta() {
+    final key = _selectedPractice;
+    final t = key != null ? kPracticeTypes[key] : null;
+    if (t == null) return ('Auto', Icons.auto_awesome, Colors.white70);
+    return (t['label'] as String, t['icon'] as IconData, t['color'] as Color);
+  }
+
+  // Sélecteur de pratique modifiable en cours de sortie (chip du bandeau).
+  Future<void> _showPracticePicker() async {
     final prefs = await SharedPreferences.getInstance();
-    // Dernier choix mémorisé : true = « Partager et démarrer » (défaut).
-    final bool sharePrimary = prefs.getBool(_prefKeyLastShare) ?? true;
     if (!mounted) return;
     await showModalBottomSheet(
       context: context,
@@ -1835,11 +2024,77 @@ class _RideScreenState extends State<RideScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+            24, 20, 24, 24 + MediaQuery.of(ctx).padding.bottom),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Pratique',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 4),
+            const Text('Auto = détection automatique à la fin de la sortie.',
+              style: TextStyle(fontSize: 13, color: Colors.white54)),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _practiceChip(
+                  label: 'Auto',
+                  icon: Icons.auto_awesome,
+                  color: Colors.white70,
+                  selected: _selectedPractice == null,
+                  onTap: () async {
+                    setState(() => _selectedPractice = null);
+                    await _saveLastPractice(null, prefs);
+                    if (mounted) Navigator.pop(ctx);
+                  },
+                ),
+                ...kPracticeTypes.entries.map(
+                  (e) => _practiceChip(
+                    label: e.value['label'] as String,
+                    icon: e.value['icon'] as IconData,
+                    color: e.value['color'] as Color,
+                    selected: _selectedPractice == e.key,
+                    onTap: () async {
+                      setState(() => _selectedPractice = e.key);
+                      await _saveLastPractice(e.key, prefs);
+                      if (mounted) Navigator.pop(ctx);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showStartRideSheet() async {
+    bool loading = false;
+    final prefs = await SharedPreferences.getInstance();
+    // Dernière pratique choisie (mémorisée entre sessions ; null = Auto).
+    String? selectedPractice =
+        _selectedPractice ?? prefs.getString(_prefKeyLastPractice);
+    // Dernier choix mémorisé : true = « Partager et démarrer » (défaut).
+    final bool sharePrimary = prefs.getBool(_prefKeyLastShare) ?? true;
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) => Padding(
           padding: EdgeInsets.fromLTRB(
               24, 20, 24, 32 + MediaQuery.of(ctx).padding.bottom),
-          child: Column(
+          child: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1863,6 +2118,35 @@ class _RideScreenState extends State<RideScreen> {
                 style: TextStyle(fontSize: 14, color: Colors.white54),
               ),
               const SizedBox(height: 20),
+              const Text(
+                'Pratique',
+                style: TextStyle(fontSize: 14, color: Colors.white54),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _practiceChip(
+                    label: 'Auto',
+                    icon: Icons.auto_awesome,
+                    color: Colors.white70,
+                    selected: selectedPractice == null,
+                    onTap: () => setSheetState(() => selectedPractice = null),
+                  ),
+                  ...kPracticeTypes.entries.map(
+                    (e) => _practiceChip(
+                      label: e.value['label'] as String,
+                      icon: e.value['icon'] as IconData,
+                      color: e.value['color'] as Color,
+                      selected: selectedPractice == e.key,
+                      onTap: () =>
+                          setSheetState(() => selectedPractice = e.key),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
               _buildStartOption(
                 primary: sharePrimary,
                 accent: const Color(0xFF00C853),
@@ -1873,6 +2157,8 @@ class _RideScreenState extends State<RideScreen> {
                 loading: loading,
                 onTap: () async {
                   setSheetState(() => loading = true);
+                  _selectedPractice = selectedPractice;
+                  await _saveLastPractice(selectedPractice, prefs);
                   Navigator.pop(ctx);
                   await prefs.setBool(_prefKeyLastShare, true);
                   await startRide(shareLink: true);
@@ -1889,12 +2175,15 @@ class _RideScreenState extends State<RideScreen> {
                 loading: loading,
                 onTap: () async {
                   setSheetState(() => loading = true);
+                  _selectedPractice = selectedPractice;
+                  await _saveLastPractice(selectedPractice, prefs);
                   Navigator.pop(ctx);
                   await prefs.setBool(_prefKeyLastShare, false);
                   await startRide(shareLink: false);
                 },
               ),
             ],
+          ),
           ),
         ),
       ),
@@ -1973,6 +2262,81 @@ class _RideScreenState extends State<RideScreen> {
     return destPath;
   }
 
+  // Ouvre une photo en plein écran avec zoom + bouton de suppression.
+  Future<void> _openPhotoViewer({
+    required String path,
+    required VoidCallback onDelete,
+  }) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      builder: (dctx) => Stack(
+        children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: Center(child: Image.file(File(path))),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(dctx).padding.top + 12,
+            right: 12,
+            child: GestureDetector(
+              onTap: () => Navigator.of(dctx).pop(),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(
+                  color: Colors.black54,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, color: Colors.white, size: 22),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: MediaQuery.of(dctx).padding.bottom + 28,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  Navigator.of(dctx).pop();
+                  onDelete();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.delete_outline, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text(
+                        'Supprimer la photo',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showAddWaypointModal() async {
     final noteController = TextEditingController();
     final List<String> selectedPhotoPaths = [];
@@ -1993,6 +2357,7 @@ class _RideScreenState extends State<RideScreen> {
                 24 +
                 MediaQuery.of(modalContext).padding.bottom,
           ),
+          child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -2051,40 +2416,24 @@ class _RideScreenState extends State<RideScreen> {
                   ...selectedPhotoPaths.map(
                     (path) => Padding(
                       padding: const EdgeInsets.only(right: 8),
-                      child: Stack(
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: Image.file(
-                              File(path),
-                              width: 72,
-                              height: 72,
-                              fit: BoxFit.cover,
-                            ),
+                      // Tap → visualiseur plein écran (avec bouton Supprimer).
+                      // Plus de croix sur la vignette : trop petite à viser.
+                      child: GestureDetector(
+                        onTap: () => _openPhotoViewer(
+                          path: path,
+                          onDelete: () => setModalState(
+                            () => selectedPhotoPaths.remove(path),
                           ),
-                          Positioned(
-                            top: 2,
-                            right: 2,
-                            child: GestureDetector(
-                              onTap: () => setModalState(
-                                () => selectedPhotoPaths.remove(path),
-                              ),
-                              child: Container(
-                                width: 20,
-                                height: 20,
-                                decoration: const BoxDecoration(
-                                  color: Colors.black54,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(
-                                  Icons.close,
-                                  size: 14,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.file(
+                            File(path),
+                            width: 72,
+                            height: 72,
+                            fit: BoxFit.cover,
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -2207,6 +2556,7 @@ class _RideScreenState extends State<RideScreen> {
               ),
             ],
           ),
+          ),
         ),
       ),
     );
@@ -2273,8 +2623,10 @@ class _RideScreenState extends State<RideScreen> {
     if (safetyShareCode == null) return;
     final url = 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
     final message =
-        'Je démarre une sortie avec Sunday Tracker.\nTu peux consulter ma dernière position connue ici :\n$url';
-    await Share.share(message, subject: 'Sunday Tracker Safety Beacon');
+        'Je démarre une sortie avec Sunday Tracker.\n\n'
+        'Tu peux suivre ma position en direct ici :\n'
+        '$url';
+    await Share.share(message, subject: 'Sunday Tracker Live');
   }
 
   Future<void> _showExitRideModal() async {
@@ -2684,7 +3036,8 @@ class _RideScreenState extends State<RideScreen> {
       'points': _pointsWithAlt,
       'waypoints': rideWaypoints,
     };
-    rideData['practice'] = detectPractice(rideData);
+    // Pratique choisie manuellement au démarrage sinon détection auto.
+    rideData['practice'] = _selectedPractice ?? detectPractice(rideData);
     try {
       await box.add(rideData);
     } catch (e) {
@@ -4027,16 +4380,17 @@ class _RideScreenState extends State<RideScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Pill "Détails" flottante — aucun fond sous elle
+        // Bouton flottant « Afficher plus » au-dessus du bandeau (séparé).
         Center(
           child: GestureDetector(
             onTap: _showDetailSheet,
+            behavior: HitTestBehavior.opaque,
             child: Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.72),
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(28),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.4),
@@ -4047,14 +4401,14 @@ class _RideScreenState extends State<RideScreen> {
               child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.keyboard_arrow_up, color: Colors.white54, size: 14),
-                  SizedBox(width: 4),
+                  Icon(Icons.keyboard_arrow_up, color: Colors.white70, size: 23),
+                  SizedBox(width: 8),
                   Text(
-                    'Voir les détails',
+                    'Afficher plus',
                     style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.white60,
-                      fontWeight: FontWeight.w500,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
                       decoration: TextDecoration.none,
                     ),
                   ),
@@ -4063,15 +4417,15 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
         ),
-        // Barre d'actions compacte : Stop | Pause | SOS
+        // Barre d'actions : Stop | Pause | SOS
         Container(
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.88),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            color: Colors.black.withValues(alpha: 0.9),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           ),
-          padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomPad),
+          padding: EdgeInsets.fromLTRB(12, 12, 12, 14 + bottomPad),
           child: SizedBox(
-            height: 56,
+            height: 74,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -4082,20 +4436,20 @@ class _RideScreenState extends State<RideScreen> {
                     await _showExitRideModal();
                   },
                   child: Container(
-                    width: 76,
+                    width: 82,
                     decoration: BoxDecoration(
                       color: const Color(0xFF1A1A1A),
-                      borderRadius: BorderRadius.circular(16),
+                      borderRadius: BorderRadius.circular(20),
                     ),
                     child: const Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.stop, color: Colors.red, size: 22),
-                        SizedBox(height: 2),
+                        Icon(Icons.stop, color: Colors.red, size: 27),
+                        SizedBox(height: 3),
                         Text(
                           'Stop',
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 13,
                             fontWeight: FontWeight.bold,
                             color: Colors.white70,
                             decoration: TextDecoration.none,
@@ -4111,9 +4465,9 @@ class _RideScreenState extends State<RideScreen> {
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
                       backgroundColor: rideIsPaused ? Colors.green : Colors.blue,
-                      padding: EdgeInsets.zero,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(20),
                       ),
                     ),
                     onPressed: togglePauseRide,
@@ -4121,8 +4475,8 @@ class _RideScreenState extends State<RideScreen> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Container(
-                          width: 34,
-                          height: 34,
+                          width: 38,
+                          height: 38,
                           decoration: BoxDecoration(
                             color: Colors.white.withValues(alpha: 0.2),
                             shape: BoxShape.circle,
@@ -4132,17 +4486,23 @@ class _RideScreenState extends State<RideScreen> {
                                 ? Icons.play_arrow_rounded
                                 : Icons.pause_rounded,
                             color: Colors.white,
-                            size: 22,
+                            size: 26,
                           ),
                         ),
                         const SizedBox(width: 10),
-                        Text(
-                          rideIsPaused ? 'Reprendre' : 'Pause',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                            decoration: TextDecoration.none,
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              rideIsPaused ? 'Reprise' : 'Pause',
+                              maxLines: 1,
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                                decoration: TextDecoration.none,
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -4154,20 +4514,20 @@ class _RideScreenState extends State<RideScreen> {
                 GestureDetector(
                   onTap: () {},
                   child: Container(
-                    width: 76,
+                    width: 82,
                     decoration: BoxDecoration(
                       color: const Color(0xFFB71C1C),
-                      borderRadius: BorderRadius.circular(16),
+                      borderRadius: BorderRadius.circular(20),
                     ),
                     child: const Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.emergency, color: Colors.white, size: 22),
-                        SizedBox(height: 2),
+                        Icon(Icons.emergency, color: Colors.white, size: 27),
+                        SizedBox(height: 3),
                         Text(
                           'SOS',
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 13,
                             fontWeight: FontWeight.bold,
                             color: Colors.white,
                             decoration: TextDecoration.none,
@@ -4177,10 +4537,10 @@ class _RideScreenState extends State<RideScreen> {
                     ),
                   ),
                 ),
-              ],
+                ],
+              ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -4313,6 +4673,9 @@ class _RideScreenState extends State<RideScreen> {
       'gpsColor': rideIsPaused ? _gpsColorBeforePause : _gpsSignalColor(),
       'lastGpsUpdateTime': _lastGpsUpdateTime,
       'notificationCount': _notificationCount,
+      'practiceLabel': _practiceMeta().$1,
+      'practiceIcon': _practiceMeta().$2,
+      'practiceColor': _practiceMeta().$3,
     };
   }
 
@@ -4325,6 +4688,7 @@ class _RideScreenState extends State<RideScreen> {
         liveGetter: _getLivePanelData,
         onEditTitle: () => _showEditModal(focusNote: false),
         onEditNote: () => _showEditModal(focusNote: true),
+        onEditPractice: _showPracticePicker,
         onCopy: () {
           final lat = double.tryParse(latitude);
           final lng = double.tryParse(longitude);
@@ -4798,6 +5162,7 @@ class _PauseSheetWidget extends StatefulWidget {
   final VoidCallback onOpen;
   final VoidCallback onEditTitle;
   final VoidCallback onEditNote;
+  final VoidCallback onEditPractice;
 
   const _PauseSheetWidget({
     required this.liveGetter,
@@ -4805,6 +5170,7 @@ class _PauseSheetWidget extends StatefulWidget {
     required this.onOpen,
     required this.onEditTitle,
     required this.onEditNote,
+    required this.onEditPractice,
   });
 
   @override
@@ -4956,14 +5322,24 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
             style: const TextStyle(fontSize: 13, color: Colors.white54),
           ),
           const SizedBox(height: 10),
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               _statusPill(icon: rideIcon, label: rideLabel, color: rideColor),
-              const SizedBox(width: 8),
               _statusPill(
                 icon: Icons.signal_cellular_alt,
                 label: 'GPS ${_live['gpsLabel'] as String}',
                 color: _live['gpsColor'] as Color,
+              ),
+              // Pratique — cliquable pour changer le type de sortie à la volée.
+              GestureDetector(
+                onTap: widget.onEditPractice,
+                child: _statusPill(
+                  icon: _live['practiceIcon'] as IconData,
+                  label: _live['practiceLabel'] as String,
+                  color: _live['practiceColor'] as Color,
+                ),
               ),
             ],
           ),

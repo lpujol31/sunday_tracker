@@ -93,9 +93,15 @@ class RideTraceThumbnail extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white12),
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: content,
+      // La vignette n'est jamais interactive : on la rend transparente aux
+      // gestes pour que le tap traverse jusqu'au GestureDetector de la carte
+      // (ouverture du détail). Sans ça, le GestureDetector interne de
+      // FlutterMap absorbe le tap, même avec InteractiveFlag.none.
+      child: IgnorePointer(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: content,
+        ),
       ),
     );
   }

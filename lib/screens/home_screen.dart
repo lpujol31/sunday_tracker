@@ -8,7 +8,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
+import 'account_screen.dart';
 import '../services/photo_sync_service.dart';
+import '../services/pending_deletions_service.dart';
+import '../services/account_service.dart';
 import '../utils/date_labels.dart';
 import '../widgets/ride_trace_thumbnail.dart';
 import '../widgets/ride_share_card.dart';
@@ -155,17 +158,96 @@ class _HomeScreenState extends State<HomeScreen> {
   Box? _ridesBox;
   bool _recovering = false;
   bool _showOldRides = true;
+  final AccountService _account = AccountService();
+  bool _accountSaved = false;
 
   @override
   void initState() {
     super.initState();
     loadAppVersion();
+    _refreshAccountStatus();
     _openBox();
+  }
+
+  void _refreshAccountStatus() {
+    final saved = _account.currentStatus().isSaved;
+    if (mounted) {
+      setState(() => _accountSaved = saved);
+    } else {
+      _accountSaved = saved;
+    }
+  }
+
+  /// Icône compte : silhouette dans un rond (avatar) + pastille verte accrochée
+  /// au coin quand le compte est sauvegardé (rattaché à un email).
+  Widget _accountBadge({required bool saved, required double size}) {
+    final dot = size * 0.40;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: size,
+            height: size,
+            decoration: const BoxDecoration(
+              color: Color(0xFF1F1F1F),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.person_outline,
+                color: Colors.white, size: size * 0.6),
+          ),
+          if (saved)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: dot,
+                height: dot,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF22C55E),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                      color: const Color(0xFF0D0D0D), width: 1.5),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Ouvre l'écran « Mon compte ». Au retour, rafraîchit l'état (icône + carte).
+  Future<void> _openAccountScreen() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => AccountScreen(onRecovered: _onAccountRecovered),
+      ),
+    );
+    _refreshAccountStatus();
+  }
+
+  /// Après une récupération (Flow B) : on bascule sur un autre compte. On vide
+  /// d'abord le local (sinon les sorties de l'ancien compte resteraient affichées
+  /// et pourraient se recopier sous le nouveau), puis on rapatrie l'historique du
+  /// compte retrouvé depuis Supabase.
+  Future<void> _onAccountRecovered() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('rides_initial_sync_done');
+    await _ridesBox?.clear();
+    await _autoRestoreFromRidesTable();
+    _refreshAccountStatus();
   }
 
   Future<void> _openBox() async {
     final box = await Hive.openBox('rides');
     if (mounted) setState(() => _ridesBox = box);
+    // Rejoue d'abord les suppressions faites hors-ligne : le serveur doit être
+    // nettoyé AVANT toute restauration/re-sync, sinon une sortie supprimée
+    // hors-ligne ressusciterait.
+    await flushPendingDeletions();
     if (box.isEmpty) {
       await _autoRestoreFromRidesTable();
     } else {
@@ -214,10 +296,14 @@ class _HomeScreenState extends State<HomeScreen> {
           .select()
           .order('started_at');
       final box = _ridesBox!;
+      final pending = pendingDeletionKeys();
       for (final row in rows) {
         final rideJson = row['ride_json'];
         if (rideJson is Map) {
-          await box.add(Map<String, dynamic>.from(rideJson.cast<String, dynamic>()));
+          final ride = Map<String, dynamic>.from(rideJson.cast<String, dynamic>());
+          // Ne pas ressusciter une sortie en cours de suppression serveur.
+          if (pending.contains(ride['startTime'])) continue;
+          await box.add(ride);
         }
       }
       if (mounted && (rows as List).isNotEmpty) {
@@ -238,6 +324,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _refreshFromSupabase() async {
     final box = _ridesBox;
     if (box == null) return;
+    // Rejoue les suppressions en attente avant de retélécharger, sinon on
+    // réinjecterait une sortie qu'on vient de supprimer hors-ligne.
+    await flushPendingDeletions();
+    final pending = pendingDeletionKeys();
     try {
       final rows = await Supabase.instance.client
           .from('rides')
@@ -259,6 +349,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Map<String, dynamic>.from(rideJson.cast<String, dynamic>());
         final startedAt = ride['startTime'] as String?;
         if (startedAt == null) continue;
+        // Ne pas ressusciter une sortie en cours de suppression serveur.
+        if (pending.contains(startedAt)) continue;
         if (existingKeys.containsKey(startedAt)) {
           await box.put(existingKeys[startedAt], ride);
         } else {
@@ -612,6 +704,34 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Étiquette « lieu » (départ / arrivée) : icône + nom de commune, teinte
+  // dédiée (vert départ, rouge arrivée) pour se distinguer des #zones orange.
+  Widget buildPlaceTag(IconData icon, String place, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            place,
+            style: TextStyle(
+              color: color,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Tag de pratique coloré + cliquable
   Widget buildPracticeTag(
     String practiceKey,
@@ -627,7 +747,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: () => _showPracticePicker(context, rideKey, ridesBox),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           color: tagColor.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(20),
@@ -636,20 +756,20 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 11, color: tagColor),
-            const SizedBox(width: 4),
+            Icon(icon, size: 13, color: tagColor),
+            const SizedBox(width: 5),
             Text(
               label,
               style: TextStyle(
                 color: tagColor,
-                fontSize: 9,
+                fontSize: 11,
                 fontWeight: FontWeight.w700,
               ),
             ),
             const SizedBox(width: 3),
             Icon(
               Icons.keyboard_arrow_down,
-              size: 12,
+              size: 14,
               color: tagColor,
             ),
           ],
@@ -926,6 +1046,14 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Mon compte',
+            onPressed: _openAccountScreen,
+            icon: _accountBadge(saved: _accountSaved, size: 30),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: SafeArea(
         top: false,
@@ -1023,6 +1151,59 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+
+            // ----------------------------------------------------------------
+            // CARTE DE RAPPEL — sauvegarde du compte (masquée si déjà sauvegardé)
+            // ----------------------------------------------------------------
+            if (!_accountSaved) ...[
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: _openAccountScreen,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1206),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: const Color(0xFFFF8A00).withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded,
+                          color: Color(0xFFFF8A00), size: 24),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Sauvegarde tes sorties',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Rattache ton email pour ne rien perdre',
+                              style: TextStyle(
+                                color: Colors.white54,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right,
+                          color: Colors.white38, size: 22),
+                    ],
+                  ),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 20),
             Align(
@@ -1178,6 +1359,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     final departureTime =
                         '${startDate.hour.toString().padLeft(2, '0')}:'
                         '${startDate.minute.toString().padLeft(2, '0')}';
+                    final endDate =
+                        DateTime.tryParse(ride['endTime'] ?? '')?.toLocal();
+                    final arrivalTime = endDate == null
+                        ? null
+                        : '${endDate.hour.toString().padLeft(2, '0')}:'
+                            '${endDate.minute.toString().padLeft(2, '0')}';
 
                     final practiceKey = (ride['practice'] as String?)?.isNotEmpty == true
                         ? ride['practice'] as String
@@ -1196,11 +1383,19 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                     }
 
+                    // Lieux départ / arrivée : startCity (fallback ancienne
+                    // clé `city`) et endCity. On n'affiche l'arrivée que si elle
+                    // diffère du départ (sinon redondant sur une boucle).
+                    final startCity =
+                        (ride['startCity'] ?? ride['city'] ?? '').toString().trim();
+                    final endCity = (ride['endCity'] ?? '').toString().trim();
+
                     final hasTags = wpCount > 0 ||
                         photoCount > 0 ||
+                        startCity.isNotEmpty ||
+                        endCity.isNotEmpty ||
                         (ride['department'] ?? '').toString().isNotEmpty ||
-                        (ride['region'] ?? '').toString().isNotEmpty ||
-                        (ride['city'] ?? '').toString().isNotEmpty;
+                        (ride['region'] ?? '').toString().isNotEmpty;
 
                     // Étiquettes (WP / photos / lieux), construites une fois et
                     // affichées soit inline dans la colonne (tablette), soit
@@ -1211,35 +1406,31 @@ class _HomeScreenState extends State<HomeScreen> {
                       if (photoCount > 0)
                         buildCountTag(Icons.photo_camera, photoCount,
                             photoCount > 1 ? 'photos' : 'photo'),
+                      if (startCity.isNotEmpty)
+                        buildPlaceTag(Icons.trip_origin, startCity,
+                            const Color(0xFF22C55E)),
+                      if (endCity.isNotEmpty && endCity != startCity)
+                        buildPlaceTag(Icons.sports_score, endCity,
+                            const Color(0xFFEF4444)),
                       if ((ride['department'] ?? '').toString().isNotEmpty)
                         buildTag('#${ride['department']}'),
                       if ((ride['region'] ?? '').toString().isNotEmpty)
                         buildTag('#${ride['region']}'),
-                      if ((ride['city'] ?? '').toString().isNotEmpty)
-                        buildTag('#${ride['city']}'),
                     ];
-
-                    // Icône du moment de la journée (lune / soleil), déduite de
-                    // l'heure de départ — utilisée par la carte téléphone.
-                    final startHour = startDate.hour;
-                    final IconData momentIcon;
-                    final Color momentColor;
-                    if (startHour < 6 || startHour >= 21) {
-                      momentIcon = Icons.nightlight_round;
-                      momentColor = const Color(0xFFA855F7);
-                    } else if (startHour >= 18) {
-                      momentIcon = Icons.wb_twilight;
-                      momentColor = const Color(0xFFFB923C);
-                    } else {
-                      momentIcon = Icons.wb_sunny;
-                      momentColor = const Color(0xFFFBBF24);
-                    }
 
                     // Durée compacte pour la carte téléphone : « 0:17:37 » → « 17:37 ».
                     var durCompact = formatDuration(ride['durationSeconds']);
                     if (durCompact.startsWith('0:')) {
                       durCompact = durCompact.substring(2);
                     }
+
+                    void openDetail() => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) =>
+                                RideDetailScreen(ride: ride, rideKey: rideKey),
+                          ),
+                        );
 
                     return Dismissible(
                       key: ValueKey(rideKey),
@@ -1280,12 +1471,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Opacity(
                         opacity: isOld ? 0.45 : 1.0,
                         child: GestureDetector(
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => RideDetailScreen(ride: ride, rideKey: rideKey),
-                            ),
-                          ),
+                          onTap: openDetail,
                           child: Container(
                             margin: const EdgeInsets.only(bottom: 12),
                             padding: const EdgeInsets.all(14),
@@ -1330,12 +1516,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                         crossAxisAlignment: CrossAxisAlignment.center,
                                         children: [
                                           SizedBox(
-                                            width: 44,
+                                            width: 52,
                                             child: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              crossAxisAlignment: CrossAxisAlignment.center,
                                               children: [
                                                 Text(
                                                   '${startDate.day}',
+                                                  textAlign: TextAlign.center,
                                                   style: const TextStyle(
                                                     fontSize: 34,
                                                     fontWeight: FontWeight.w800,
@@ -1346,6 +1533,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 const SizedBox(height: 2),
                                                 Text(
                                                   monthStr,
+                                                  textAlign: TextAlign.center,
                                                   style: const TextStyle(
                                                     fontSize: 12,
                                                     fontWeight: FontWeight.w700,
@@ -1355,11 +1543,48 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 ),
                                                 Text(
                                                   '${startDate.year}',
+                                                  textAlign: TextAlign.center,
                                                   style: const TextStyle(
                                                     fontSize: 11,
                                                     color: Colors.white54,
                                                   ),
                                                 ),
+                                                const SizedBox(height: 6),
+                                                // Heure de départ, sous la date.
+                                                Row(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  children: [
+                                                    const Icon(Icons.flag,
+                                                        size: 11, color: Colors.orange),
+                                                    const SizedBox(width: 3),
+                                                    Text(
+                                                      departureTime,
+                                                      style: const TextStyle(
+                                                        fontSize: 12,
+                                                        color: Colors.white60,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                // Heure d'arrivée, sous le départ.
+                                                if (arrivalTime != null) ...[
+                                                  const SizedBox(height: 3),
+                                                  Row(
+                                                    mainAxisAlignment: MainAxisAlignment.center,
+                                                    children: [
+                                                      const Icon(Icons.sports_score,
+                                                          size: 11, color: Color(0xFFEF4444)),
+                                                      const SizedBox(width: 3),
+                                                      Text(
+                                                        arrivalTime,
+                                                        style: const TextStyle(
+                                                          fontSize: 12,
+                                                          color: Colors.white60,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ],
                                               ],
                                             ),
                                           ),
@@ -1368,14 +1593,16 @@ class _HomeScreenState extends State<HomeScreen> {
                                               width: 1, height: 84, color: Colors.white12),
                                           const SizedBox(width: 12),
                                           Expanded(
-                                            child: RideTraceThumbnail(
-                                              points: ride['points'] ?? [],
-                                              width: double.infinity,
-                                              height: 118,
+                                            child: GestureDetector(
+                                              behavior: HitTestBehavior.opaque,
+                                              onTap: openDetail,
+                                              child: RideTraceThumbnail(
+                                                points: ride['points'] ?? [],
+                                                width: double.infinity,
+                                                height: 118,
+                                              ),
                                             ),
                                           ),
-                                          const SizedBox(width: 12),
-                                          Icon(momentIcon, color: momentColor, size: 30),
                                         ],
                                       ),
                                       const SizedBox(height: 12),
@@ -1388,11 +1615,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                               runSpacing: 4,
                                               crossAxisAlignment: WrapCrossAlignment.center,
                                               children: [
-                                                Row(mainAxisSize: MainAxisSize.min, children: [
-                                                  const Icon(Icons.flag, size: 14, color: Colors.white60),
-                                                  const SizedBox(width: 4),
-                                                  Text(departureTime, style: const TextStyle(fontSize: 13, color: Colors.white70)),
-                                                ]),
                                                 Row(mainAxisSize: MainAxisSize.min, children: [
                                                   const Icon(Icons.timer, size: 14, color: Colors.white60),
                                                   const SizedBox(width: 4),
@@ -1517,10 +1739,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                     const SizedBox(width: 10),
                                     // ── Miniature trace ──
-                                    RideTraceThumbnail(
-                                      points: ride['points'] ?? [],
-                                      width: thumbW,
-                                      height: thumbH,
+                                    GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: openDetail,
+                                      child: RideTraceThumbnail(
+                                        points: ride['points'] ?? [],
+                                        width: thumbW,
+                                        height: thumbH,
+                                      ),
                                     ),
                                     const SizedBox(width: 12),
                                     // ── Titre + stats ──

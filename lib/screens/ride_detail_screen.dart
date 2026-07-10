@@ -9,6 +9,7 @@ import 'package:sunday_tracker/utils/date_labels.dart';
 import 'package:sunday_tracker/utils/geo_labels.dart';
 import 'package:sunday_tracker/screens/home_screen.dart' show kPracticeTypes, detectPractice;
 import 'package:sunday_tracker/services/photo_sync_service.dart';
+import 'package:sunday_tracker/services/pending_deletions_service.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -65,12 +66,31 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   ];
 
   // ── Sheet glissant ───────────────────────────────────────────────────────────
-  static const double _kMinSize     = 0.32; // réduit (carte enrichie : pratique + départ/arrivée)
+  // Plancher historique du mode réduit. La taille réduite réelle (_minSize) est
+  // calculée en pixels à chaque build : la carte réduite a une hauteur ~fixe, or
+  // 0.32 de l'écran ne suffisait pas sur beaucoup de mobiles → le haut de la
+  // carte (pastille « Voir les détails ») était rogné. Voir _computeMinSize.
+  static const double _kMinFloor    = 0.32;
   static const double _kInitialSize = 0.50; // « Agrandir » → 50 % carte / 50 % panneau
   static const double _kMaxSize     = 0.95; // tirer plus haut → plein écran
   static const double _kFloorSize   = 0.01;
+  double _minSize = _kMinFloor; // recalculé dans build() selon l'écran
   late DraggableScrollableController _sheetController;
   bool _isClosing = false;
+
+  // Taille réduite du panneau, en fraction d'écran, dérivée de la hauteur réelle
+  // (px) de l'overlay réduit : pastille + carte flottante (pratique / départ /
+  // arrivée / distance / durée). Sensible à la hauteur d'écran ET au facteur de
+  // mise à l'échelle du texte (accessibilité) pour ne jamais tronquer le haut.
+  double _computeMinSize() {
+    final mq = MediaQuery.of(context);
+    final ts = mq.textScaler.scale(1.0).clamp(1.0, 1.6);
+    // ~110 px fixes (icônes, paddings, séparateurs) + ~150 px de texte qui
+    // grandit avec le facteur d'échelle, + la marge système du bas.
+    final overlayPx = 110 + 150 * ts + mq.padding.bottom;
+    final needed = overlayPx / mq.size.height;
+    return needed.clamp(_kMinFloor, 0.44);
+  }
 
   // ── Cheat code debug (5 taps rapides sur la poignée du panneau) ──────────────
   bool _showDebugPanel = false;
@@ -111,7 +131,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
       if (_ridePoints.isEmpty) return;
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
-      _fitToRoute(panelFraction: _kMinSize);
+      _fitToRoute(panelFraction: _minSize);
     });
   }
 
@@ -151,7 +171,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
 
   void _onPanelChanged() {
     if (_recentering && _sheetController.isAttached) {
-      _fitToRoute(panelFraction: _sheetController.size.clamp(_kMinSize, _kMaxSize));
+      _fitToRoute(panelFraction: _sheetController.size.clamp(_minSize, _kMaxSize));
     }
     if (_sheetController.isAttached && _sheetController.size < 0.10 && !_isClosing) {
       _isClosing = true;
@@ -245,14 +265,18 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     final dt = DateTime.tryParse(startTime)?.toLocal();
     if (dt == null) return '';
     const months = ['jan.','fév.','mars','avr.','mai','juin','juil.','août','sep.','oct.','nov.','déc.'];
-    final date = '${kFrDaysShort[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
-    final startH = '${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+    String dayLabel(DateTime d) => '${kFrDaysShort[d.weekday - 1]} ${d.day} ${months[d.month - 1]}';
+    String hm(DateTime d) => '${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
+    final startH = hm(dt);
     final endTime = widget.ride['endTime'];
     final dtEnd = endTime != null ? DateTime.tryParse(endTime)?.toLocal() : null;
-    final endH = dtEnd != null
-        ? '${dtEnd.hour.toString().padLeft(2,'0')}:${dtEnd.minute.toString().padLeft(2,'0')}'
-        : null;
-    return endH != null ? '$date | $startH - $endH' : '$date | $startH';
+    if (dtEnd == null) return '${dayLabel(dt)} ${dt.year} | $startH';
+    final sameDay = dt.year == dtEnd.year &&
+        dt.month == dtEnd.month && dt.day == dtEnd.day;
+    // Même journée (cas courant) : « dim. 5 juil. 2026 | 09:38 - 11:04 ».
+    if (sameDay) return '${dayLabel(dt)} ${dt.year} | $startH - ${hm(dtEnd)}';
+    // Sortie à cheval sur deux dates (rando de nuit) : on montre les deux jours.
+    return '${dayLabel(dt)} $startH → ${dayLabel(dtEnd)} ${hm(dtEnd)}';
   }
 
   Future<void> _loadMapStyle() async {
@@ -606,8 +630,70 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     }
   }
 
+  // Ouvre une photo de waypoint en plein écran avec zoom + bouton Supprimer.
+  Future<void> _openWaypointPhotoViewer({
+    required dynamic entry,
+    required VoidCallback onDelete,
+  }) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      builder: (dctx) => Stack(
+        children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: Center(child: photoWidget(entry, fit: BoxFit.contain)),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(dctx).padding.top + 12,
+            right: 12,
+            child: GestureDetector(
+              onTap: () => Navigator.of(dctx).pop(),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                child: const Icon(Icons.close, color: Colors.white, size: 22),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: MediaQuery.of(dctx).padding.bottom + 28,
+            left: 0, right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  Navigator.of(dctx).pop();
+                  onDelete();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.delete_outline, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text('Supprimer la photo',
+                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Popup waypoint ───────────────────────────────────────────────────────────
-  void _showWaypointPopup(BuildContext context, Map wp) {
+  void _showWaypointPopup(BuildContext context, Map wp, {int? number}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -620,7 +706,19 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                 24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
-                const Icon(Icons.place, color: Colors.blue, size: 22),
+                // Pastille numérotée (raccord avec le pin sur la carte), repli
+                // sur l'icône si le rang est inconnu.
+                if (number != null)
+                  Container(
+                    width: 24, height: 24,
+                    alignment: Alignment.center,
+                    decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle),
+                    child: Text('$number',
+                      style: const TextStyle(
+                        color: Colors.white, fontSize: 13, fontWeight: FontWeight.w800, height: 1)),
+                  )
+                else
+                  const Icon(Icons.place, color: Colors.blue, size: 22),
                 const SizedBox(width: 10),
                 Text('Point mémorisé — ${_formatWaypointTime(wp['timestamp'])}',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
@@ -639,37 +737,23 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                     itemCount: photos.length,
                     itemBuilder: (context, index) {
                       final entry = photos[index];
+                      // Tap → visualiseur plein écran (avec bouton Supprimer).
+                      // Plus de croix sur la vignette : trop petite à viser.
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
-                        child: Stack(children: [
-                          GestureDetector(
-                            onTap: () => showDialog(
-                              context: context,
-                              builder: (_) => Dialog(
-                                backgroundColor: Colors.black,
-                                child: InteractiveViewer(child: photoWidget(entry, fit: BoxFit.contain)),
-                              ),
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: photoWidget(entry, width: 120, height: 120),
-                            ),
+                        child: GestureDetector(
+                          onTap: () => _openWaypointPhotoViewer(
+                            entry: entry,
+                            onDelete: () async {
+                              await _deletePhotoFromWaypoint(wp, entry);
+                              setSheetState(() {});
+                            },
                           ),
-                          Positioned(
-                            top: 4, right: 4,
-                            child: GestureDetector(
-                              onTap: () async {
-                                await _deletePhotoFromWaypoint(wp, entry);
-                                setSheetState(() {});
-                              },
-                              child: Container(
-                                width: 22, height: 22,
-                                decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
-                                child: const Icon(Icons.close, size: 14, color: Colors.white),
-                              ),
-                            ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: photoWidget(entry, width: 120, height: 120),
                           ),
-                        ]),
+                        ),
                       );
                     },
                   ),
@@ -689,6 +773,140 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   // ════════════════════════════════════════════════════════════════════════════
   // CARTE
   // ════════════════════════════════════════════════════════════════════════════
+
+  // Barycentre du tracé (moyenne lat/lng), calculé une fois. Sert à décaler les
+  // pins de waypoint vers l'EXTÉRIEUR : pour une boucle, le barycentre est à
+  // l'intérieur → le pin part dehors et ne recouvre jamais la trace.
+  double? _traceMeanLat, _traceMeanLng;
+  void _ensureTraceCentroid() {
+    if (_traceMeanLat != null) return;
+    if (_ridePoints.isEmpty) { _traceMeanLat = 0; _traceMeanLng = 0; return; }
+    var sLat = 0.0, sLng = 0.0;
+    for (final p in _ridePoints) { sLat += p.latitude; sLng += p.longitude; }
+    _traceMeanLat = sLat / _ridePoints.length;
+    _traceMeanLng = sLng / _ridePoints.length;
+  }
+
+  /// Direction unitaire (repère écran) PERPENDICULAIRE à la trace au niveau du
+  /// waypoint [at]. Le pin est décalé sur le côté de la trace, du côté qui pointe
+  /// vers l'EXTÉRIEUR (loin du barycentre) : sur une boucle, le pin sort donc de
+  /// la boucle au lieu de tomber dedans. Repli sur un biais « vers le haut »
+  /// (sinon vers la droite) quand le waypoint est ~au centre du tracé.
+  Offset _leaderDirection(LatLng at) {
+    final trace = _ridePoints;
+    if (trace.length < 2) return const Offset(0, -1);
+    var nearest = 0;
+    var best = double.infinity;
+    for (var i = 0; i < trace.length; i++) {
+      final dLat = trace[i].latitude - at.latitude;
+      final dLng = trace[i].longitude - at.longitude;
+      final d = dLat * dLat + dLng * dLng;
+      if (d < best) { best = d; nearest = i; }
+    }
+    final a = trace[max(0, nearest - 2)];
+    final b = trace[min(trace.length - 1, nearest + 2)];
+    final latRad = at.latitude * pi / 180;
+    final cosLat = cos(latRad);
+    // Tangente en repère écran (mercator local) : x ∝ Δlng·cos(lat), y ∝ -Δlat.
+    final tx = (b.longitude - a.longitude) * cosLat;
+    final ty = -(b.latitude - a.latitude);
+    final tlen = sqrt(tx * tx + ty * ty);
+    if (tlen < 1e-12) return const Offset(0, -1);
+    var px = -ty / tlen; // perpendiculaire = tangente tournée de 90°
+    var py = tx / tlen;
+    // Vecteur « vers l'extérieur » = du barycentre vers le waypoint (repère écran).
+    _ensureTraceCentroid();
+    final outX = (at.longitude - _traceMeanLng!) * cosLat;
+    final outY = -(at.latitude - _traceMeanLat!);
+    if (outX * outX + outY * outY > 1e-12) {
+      // Choisit la perpendiculaire du même côté que l'extérieur.
+      if (px * outX + py * outY < 0) { px = -px; py = -py; }
+    } else {
+      // Waypoint ~au barycentre : repli sur le biais historique.
+      if (py > 1e-6) { px = -px; py = -py; } // vers le haut
+      else if (py.abs() <= 1e-6 && px < 0) { px = -px; } // sinon vers la droite
+    }
+    return Offset(px, py);
+  }
+
+  /// Marker waypoint : pin flottant numéroté décalé perpendiculairement à la
+  /// trace, relié par une fine ligne à un point posé sur sa vraie position GPS.
+  /// La boîte est centrée sur la coordonnée (alignment center) et assez grande
+  /// pour contenir le décalage dans n'importe quelle direction. Seul le pin est
+  /// cliquable (ouvre le popup) : le reste de la boîte laisse passer les taps.
+  Marker _waypointMarker(Map wp, int number) {
+    const color = Color(0xFF2563EB); // bleu soutenu, bon contraste avec le blanc
+    const lead = 30.0;   // longueur du trait de rappel (px écran)
+    const box = 120.0;
+    const badge = 30.0;  // diamètre de la pastille numérotée
+    final at = LatLng((wp['lat'] as num).toDouble(), (wp['lng'] as num).toDouble());
+    final dir = _leaderDirection(at);
+    final tip = Offset(dir.dx * lead, dir.dy * lead);
+    final angle = atan2(tip.dy, tip.dx);
+    // RepaintBoundary : isole le marqueur dans sa propre couche de composition.
+    // Combiné au trait de rappel dessiné en widget (et non plus en CustomPaint),
+    // ça supprime le « fantôme » gris qu'Impeller laissait à l'ancienne position
+    // du marqueur quand la caméra se recalait (ouverture + drag du panneau).
+    return Marker(
+      point: at,
+      width: box,
+      height: box,
+      child: RepaintBoundary(
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Trait de rappel : du point GPS (centre) vers la pastille.
+            Transform.translate(
+              offset: Offset(tip.dx / 2, tip.dy / 2),
+              child: Transform.rotate(
+                angle: angle,
+                child: Container(
+                  width: lead, height: 2,
+                  decoration: BoxDecoration(
+                    color: color, borderRadius: BorderRadius.circular(1)),
+                ),
+              ),
+            ),
+            // Point posé sur la trace = vraie position GPS du waypoint.
+            Container(
+              width: 9, height: 9,
+              decoration: BoxDecoration(
+                color: color, shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 1.5),
+              ),
+            ),
+            // Pastille ronde numérotée, déportée au bout du trait. Chiffre gros
+            // et centré → nettement plus lisible que le petit numéro logé dans
+            // la tête d'une goutte location_on.
+            Transform.translate(
+              offset: tip,
+              child: GestureDetector(
+                onTap: () => _showWaypointPopup(context, wp, number: number),
+                child: Container(
+                  width: badge, height: badge,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: color, shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withValues(alpha: 0.45), blurRadius: 4),
+                    ],
+                  ),
+                  child: Text('$number',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: number >= 10 ? 13 : 16,
+                      fontWeight: FontWeight.w800, height: 1),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildFlutterMap(List<LatLng> ridePoints, List<Map> waypointsData, List<Color> gradientColors) {
     return FlutterMap(
       mapController: mapController,
@@ -696,8 +914,8 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         initialCenter: ridePoints.isNotEmpty ? ridePoints.first : const LatLng(48.8566, 2.3522),
         initialZoom: 13,
         onTap: (tapPos, latLng) {
-          if (_sheetController.isAttached && _sheetController.size > _kMinSize + 0.02) {
-            _animateSheetTo(_kMinSize);
+          if (_sheetController.isAttached && _sheetController.size > _minSize + 0.02) {
+            _animateSheetTo(_minSize);
           }
         },
       ),
@@ -719,14 +937,6 @@ class _RideDetailScreenState extends State<RideDetailScreen>
           ),
         if (ridePoints.isNotEmpty)
           MarkerLayer(markers: [
-            ...waypointsData.map((wp) => Marker(
-              point: LatLng(wp['lat'], wp['lng']),
-              width: 36, height: 36,
-              child: GestureDetector(
-                onTap: () => _showWaypointPopup(context, wp),
-                child: const Icon(Icons.place, color: Colors.blue, size: 36),
-              ),
-            )),
             Marker(
               point: ridePoints.first, width: 22, height: 22,
               child: Container(decoration: BoxDecoration(
@@ -746,6 +956,13 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                 child: const Icon(Icons.sports_score_sharp, color: Colors.white, size: 22),
               ),
             ),
+            // Waypoints dessinés en DERNIER (au-dessus des markers départ /
+            // arrivée). Chaque WP est un pin flottant numéroté décalé
+            // PERPENDICULAIREMENT à la trace, relié par une fine ligne à un point
+            // posé sur sa vraie position GPS — évite toute superposition avec les
+            // markers structurels, même pour un WP proche de l'arrivée.
+            for (final (i, wp) in waypointsData.indexed)
+              _waypointMarker(wp, i + 1),
           ]),
       ],
     );
@@ -938,51 +1155,11 @@ class _RideDetailScreenState extends State<RideDetailScreen>
       animation: _sheetController,
       builder: (context, _) {
         final isReduced = !_sheetController.isAttached ||
-            _sheetController.size < _kMinSize + 0.05;
+            _sheetController.size < _minSize + 0.05;
 
         void toggle() {
-          _animateSheetTo(isReduced ? _kInitialSize : _kMinSize);
+          _animateSheetTo(isReduced ? _kInitialSize : _minSize);
         }
-
-        // Pastille « Voir les détails » (chevron + libellé), style cockpit,
-        // affichée uniquement en mode réduit ; en mode étendu, la barre de
-        // drag suffit à replier le panneau.
-        Widget buildPill() => GestureDetector(
-              onTap: toggle,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.72),
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.4),
-                      blurRadius: 8,
-                    ),
-                  ],
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedRotation(
-                      turns: isReduced ? 0.0 : 0.5,
-                      duration: const Duration(milliseconds: 250),
-                      child: const Icon(Icons.keyboard_arrow_up,
-                          size: 16, color: Colors.white54),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      isReduced ? 'Voir les détails' : 'Réduire',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white70,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
 
         // En-tête étendu : poignée + titre + date + statut « Terminée »
         // + mini-bande.
@@ -1090,10 +1267,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Center(child: buildPill()),
-                    const SizedBox(height: 8),
                     GestureDetector(
                       onTap: toggle,
+                      behavior: HitTestBehavior.opaque,
                       child: _buildReducedCard(),
                     ),
                     SizedBox(height: 8 + MediaQuery.of(context).padding.bottom),
@@ -1112,7 +1288,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Container(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 12),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.72),
           borderRadius: BorderRadius.circular(22),
@@ -1124,6 +1300,16 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Poignée incrustée en haut du panneau (même style qu'agrandi).
+            Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
             // Ligne du haut : pavé pratique à gauche, Départ / Arrivée à droite
             _buildPracticeAndEndpointsRow(),
             const SizedBox(height: 10),
@@ -1153,13 +1339,23 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   // Ligne partagée (réduit + étendu) : pavé pratique à gauche, Départ / Arrivée
   // (date-heure) à droite.
   Widget _buildPracticeAndEndpointsRow() {
+    // Sortie « d'un jour » (cas courant) → heure seule ; sortie à cheval sur
+    // deux dates (rando de nuit) → on préfixe le jour+mois pour lever l'ambiguïté.
+    final startDt = DateTime.tryParse('${widget.ride['startTime']}')?.toLocal();
+    final endDt   = DateTime.tryParse('${widget.ride['endTime']}')?.toLocal();
+    final sameDay = startDt == null || endDt == null ||
+        (startDt.year == endDt.year &&
+            startDt.month == endDt.month &&
+            startDt.day == endDt.day);
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Expanded(flex: 6, child: _buildPracticeHeader()),
+        // Un peu plus de place à droite quand on doit aussi afficher la date.
+        Expanded(flex: sameDay ? 6 : 5, child: _buildPracticeHeader()),
         const SizedBox(width: 10),
         Expanded(
-          flex: 5,
+          flex: sameDay ? 4 : 5,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1168,11 +1364,11 @@ class _RideDetailScreenState extends State<RideDetailScreen>
               // départ = orange, arrivée = violet.
               _endpointRow(
                 Icons.schedule, const Color(0xFFfb923c), 'Départ',
-                _formatEndpointDateTime(widget.ride['startTime'])),
+                _formatEndpointTime(widget.ride['startTime'], showDate: !sameDay, showSeconds: true)),
               const SizedBox(height: 10),
               _endpointRow(
                 Icons.sports_score, const Color(0xFFa78bfa), 'Arrivée',
-                _formatEndpointDateTime(widget.ride['endTime'])),
+                _formatEndpointTime(widget.ride['endTime'], showDate: !sameDay, showSeconds: true)),
             ],
           ),
         ),
@@ -1185,7 +1381,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Icon(icon, size: 20, color: color),
+        Icon(icon, size: 22, color: color),
         const SizedBox(width: 8),
         Expanded(
           child: Column(
@@ -1197,7 +1393,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
               const SizedBox(height: 1),
               Text(value,
                 style: const TextStyle(
-                  fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+                  fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white),
                 maxLines: 1, overflow: TextOverflow.ellipsis),
             ],
           ),
@@ -1206,18 +1402,22 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     );
   }
 
-  // « jeu. 2 juil. 2026 - 07:58 »
-  String _formatEndpointDateTime(dynamic iso) {
+  // Heure de départ/arrivée. « 07:58 » en journée ; « 5 juil. · 07:58 » quand
+  // la sortie chevauche deux dates (rando de nuit), pour ne pas perdre le jour.
+  // [showSeconds] ajoute les secondes (HH:MM:SS) pour une lecture précise des
+  // heures de départ / arrivée (raccord avec le cockpit du live).
+  String _formatEndpointTime(dynamic iso, {required bool showDate, bool showSeconds = false}) {
     if (iso == null) return '--';
     final dt = DateTime.tryParse(iso)?.toLocal();
     if (dt == null) return '--';
+    var h = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    if (showSeconds) h = '$h:${dt.second.toString().padLeft(2, '0')}';
+    if (!showDate) return h;
     const months = ['jan.','fév.','mars','avr.','mai','juin','juil.','août','sep.','oct.','nov.','déc.'];
-    final date = '${kFrDaysShort[dt.weekday - 1]} ${dt.day} ${months[dt.month - 1]} ${dt.year}';
-    final h = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return '$date - $h';
+    return '${dt.day} ${months[dt.month - 1]} · $h';
   }
 
-  // En-tête pratique : pastille + « Pratique · <label> » + itinéraire + badge.
+  // En-tête pratique : une seule puce (icône + label) + itinéraire.
   // Partagé entre la carte réduite et le header étendu.
   Widget _buildPracticeHeader() {
     final practiceKey = _nonEmpty(widget.ride['practice']) ?? detectPractice(widget.ride);
@@ -1226,38 +1426,34 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     final IconData pIcon = practice['icon'] as IconData;
     final String pLabel = practice['label'] as String;
 
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
+        // Puce unique icône + label (avant : pastille ronde + badge = doublon).
         Container(
-          width: 42, height: 42,
+          padding: const EdgeInsets.fromLTRB(8, 5, 12, 5),
           decoration: BoxDecoration(
-            color: pColor.withValues(alpha: 0.18),
-            shape: BoxShape.circle,
+            color: pColor.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: pColor.withValues(alpha: 0.5)),
           ),
-          child: Icon(pIcon, color: pColor, size: 22),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Badge pratique (remplace l'ancien libellé « Pratique · … »)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: pColor.withValues(alpha: 0.6)),
-                ),
+              Icon(pIcon, color: pColor, size: 16),
+              const SizedBox(width: 6),
+              Flexible(
                 child: Text(pLabel,
                   style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600, color: pColor)),
+                    fontSize: 12.5, fontWeight: FontWeight.w600, color: pColor),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
-              const SizedBox(height: 6),
-              _buildRouteLine(),
             ],
           ),
         ),
+        const SizedBox(height: 8),
+        _buildRouteLine(),
       ],
     );
   }
@@ -1611,12 +1807,13 @@ class _RideDetailScreenState extends State<RideDetailScreen>
 
     final items = <_PassageItem>[
       _PassageItem(type: _PassageType.start, time: startTime, coords: startCoords, altitude: altStart != null ? '$altStart m' : null),
-      ...waypoints.map((wp) => _PassageItem(
+      ...waypoints.indexed.map((e) => _PassageItem(
         type: _PassageType.waypoint,
-        time: _formatWaypointTime(wp['timestamp']),
-        note: (wp['note'] as String?)?.trim(),
-        photos: (wp['photos'] as List?)?.toList() ?? [],
-        wp: wp,
+        time: _formatWaypointTime(e.$2['timestamp']),
+        note: (e.$2['note'] as String?)?.trim(),
+        photos: (e.$2['photos'] as List?)?.toList() ?? [],
+        wp: e.$2,
+        number: e.$1 + 1,
       )),
       _PassageItem(type: _PassageType.end, time: endTime, coords: endCoords, altitude: altEnd != null ? '$altEnd m' : null),
     ];
@@ -1660,14 +1857,20 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         break;
       case _PassageType.waypoint:
         dotColor = const Color(0xFF60a5fa);
-        dotChild = const Icon(Icons.place, size: 12, color: Color(0xFF60a5fa));
+        // Numéro du waypoint (raccord avec le pin numéroté sur la carte),
+        // repli sur l'icône si le rang est indisponible.
+        dotChild = item.number != null
+            ? Text('${item.number}',
+                style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF60a5fa), height: 1))
+            : const Icon(Icons.place, size: 12, color: Color(0xFF60a5fa));
         title    = 'Point mémorisé';
         break;
     }
 
     return GestureDetector(
       onTap: item.type == _PassageType.waypoint && item.wp != null
-          ? () => _showWaypointPopup(context, item.wp!)
+          ? () => _showWaypointPopup(context, item.wp!, number: item.number)
           : null,
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         SizedBox(width: 28, child: Column(children: [
@@ -2158,6 +2361,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Recalcule la taille réduite (px → fraction) pour cet écran avant de bâtir
+    // le sheet : garantit que la carte réduite tient toujours en entier.
+    _minSize = _computeMinSize();
     final safeTop       = MediaQuery.of(context).padding.top;
     final pointsData    = widget.ride['points'] as List;
     final ridePoints    = pointsData.map((p) => LatLng(p['lat'], p['lng'])).toList();
@@ -2209,8 +2415,8 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                   : _kInitialSize;
               final panelH = screenH * panelSize;
               // Visible en réduit, disparaît quand le panneau monte vers plein écran
-              final fadeStart = _kMinSize + 0.15;
-              final fadeEnd   = _kMinSize + 0.30;
+              final fadeStart = _minSize + 0.15;
+              final fadeEnd   = _minSize + 0.30;
               final opacity = ((fadeEnd - panelSize) / (fadeEnd - fadeStart))
                   .clamp(0.0, 1.0);
               return Positioned(
@@ -2228,7 +2434,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
           // 5. Panneau glissant
           DraggableScrollableSheet(
             controller: _sheetController,
-            initialChildSize: _kMinSize,
+            initialChildSize: _minSize,
             minChildSize: _kFloorSize,
             maxChildSize: _kMaxSize,
             // Pas de snap : sinon la simulation de snap interrompt animateTo
@@ -2265,6 +2471,7 @@ class _PassageItem {
   final String? note;
   final List? photos;
   final Map? wp;
+  final int? number; // rang du waypoint (1-based) — raccord avec le pin sur la carte
 
   const _PassageItem({
     required this.type,
@@ -2274,6 +2481,7 @@ class _PassageItem {
     this.note,
     this.photos,
     this.wp,
+    this.number,
   });
 }
 
@@ -2598,29 +2806,24 @@ Future<void> deleteRide(BuildContext context, Map ride, dynamic rideKey, {bool p
       }
     }
 
-    // 3. Nettoyage Supabase best-effort.
+    // 3. Nettoyage serveur via la file de suppressions en attente.
+    //    On persiste la suppression AVANT de tenter le réseau : si l'appareil
+    //    est hors-ligne, flushPendingDeletions() échoue en silence mais l'entrée
+    //    reste et sera rejouée au prochain lancement / refresh (garantit que
+    //    safety_positions, safety_sessions, rides et le Storage finissent bien
+    //    nettoyés). En ligne, la suppression part immédiatement.
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser?.id;
     final startedAt = ride['startTime'] as String?;
-
-    final safetySessionId = ride['safetySessionId'];
-    if (safetySessionId != null) {
-      // positions avant sessions (contrainte FK).
-      try { await supabase.from('safety_positions').delete().eq('session_id', safetySessionId); } catch (_) {}
-      try { await supabase.from('safety_sessions').delete().eq('id', safetySessionId); } catch (_) {}
-    }
+    final safetySessionId = ride['safetySessionId'] as String?;
 
     if (startedAt != null) {
-      try {
-        var q = supabase.from('rides').delete().eq('started_at', startedAt);
-        if (userId != null) q = q.eq('user_id', userId);
-        await q;
-      } catch (_) {}
-    }
-
-    // 4. Storage : purge de tout le dossier du ride (attrape aussi les orphelins).
-    if (userId != null && startedAt != null) {
-      await deleteRidePhotosFolder(userId, startedAt);
+      await enqueueRideDeletion(
+        startedAt: startedAt,
+        userId: userId,
+        safetySessionId: safetySessionId,
+      );
+      await flushPendingDeletions();
     }
 
     if (context.mounted) {

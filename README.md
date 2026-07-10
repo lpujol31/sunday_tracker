@@ -5,10 +5,20 @@
 flutter run → debug → kDebugMode = true / distanceFilter: 0
 flutter run --release → release → kDebugMode = false / distanceFilter: 5
 
+### Commandes
+.\run.ps1              # mode debug  : kDebugMode=true,  distanceFilter=0, hot reload
+.\run.ps1 -Release     # mode release : kDebugMode=false, distanceFilter=5 (vrai comportement GPS)
+.\run.ps1 -NoBump      # sans bump de version
+
+.\deploy.ps1           # bump + APK release
+.\deploy.ps1 -NoBump   # rebuild sans changer la version
+.\deploy.ps1 -Bundle   # app bundle .aab (au lieu de l'APK)
+
+
 ### Github
 https://github.com/lpujol31/sunday_tracker
 git add .
-git commit -m "commentaire"
+git commit -m "1.1.0+2026070501"
 git push
 
 

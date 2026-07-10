@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Scripts de migration one-shot (outils locaux, hors dépôt)
+/scripts/
