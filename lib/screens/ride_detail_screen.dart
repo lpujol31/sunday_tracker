@@ -638,7 +638,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     await showDialog<void>(
       context: context,
       barrierColor: Colors.black,
-      builder: (dctx) => Stack(
+      builder: (dctx) => Material(
+        type: MaterialType.transparency,
+        child: Stack(
         children: [
           Positioned.fill(
             child: InteractiveViewer(
@@ -680,7 +682,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
                       Icon(Icons.delete_outline, color: Colors.white, size: 20),
                       SizedBox(width: 8),
                       Text('Supprimer la photo',
-                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
+                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold, decoration: TextDecoration.none)),
                     ],
                   ),
                 ),
@@ -688,7 +690,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 

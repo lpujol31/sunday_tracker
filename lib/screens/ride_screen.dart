@@ -2270,7 +2270,9 @@ class _RideScreenState extends State<RideScreen> {
     await showDialog<void>(
       context: context,
       barrierColor: Colors.black,
-      builder: (dctx) => Stack(
+      builder: (dctx) => Material(
+        type: MaterialType.transparency,
+        child: Stack(
         children: [
           Positioned.fill(
             child: InteractiveViewer(
@@ -2324,6 +2326,7 @@ class _RideScreenState extends State<RideScreen> {
                           color: Colors.white,
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
                         ),
                       ),
                     ],
@@ -2333,6 +2336,339 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
         ],
+      )),
+    );
+  }
+
+  String _formatWaypointTime(dynamic isoString) {
+    if (isoString == null) return '--';
+    final dt = DateTime.tryParse(isoString);
+    if (dt == null) return '--';
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  // Retire une photo d'un point déjà mémorisé (pendant la sortie).
+  Future<void> _deletePhotoFromLiveWaypoint(
+      Map<String, dynamic> wp, dynamic entry) async {
+    final local = photoLocalPath(entry);
+    final url = photoUrl(entry);
+    final current = (wp['photos'] as List?) ?? const [];
+    wp['photos'] = current.where((e) => !identical(e, entry)).toList();
+    if (mounted) setState(() {});
+    // Nettoyage disque + Storage en arrière-plan (non bloquant).
+    () async {
+      if (local != null) { try { await File(local).delete(); } catch (_) {} }
+      if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
+    }();
+  }
+
+  // Édite la note d'un point déjà mémorisé (tap sur la note dans le popup).
+  Future<void> _editWaypointNote(
+      Map<String, dynamic> wp, VoidCallback refresh) async {
+    final controller = TextEditingController(text: (wp['note'] ?? '').toString());
+    final focus = FocusNode();
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => focus.requestFocus());
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 24, right: 24, top: 24,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom +
+                24 + MediaQuery.of(ctx).padding.bottom,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Note',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+              const SizedBox(height: 14),
+              TextField(
+                controller: controller,
+                focusNode: focus,
+                style: const TextStyle(color: Colors.white),
+                maxLines: 4,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFF2A2A2A),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  hintText: 'Décris ce point...',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
+                  ),
+                  onPressed: () {
+                    wp['note'] = controller.text.trim();
+                    if (mounted) setState(() {});
+                    Navigator.of(ctx).pop();
+                    refresh();
+                  },
+                  child: const Text('Enregistrer',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // Ajoute une photo (max 3) à un point déjà mémorisé.
+  Future<void> _addPhotoToLiveWaypoint(
+      Map<String, dynamic> wp, VoidCallback refresh) async {
+    final photos = (wp['photos'] as List?) ?? const [];
+    if (photos.length >= 3) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (c) => Padding(
+        padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(c).padding.bottom),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt, color: Colors.white),
+              title: const Text('Appareil photo', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(c, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library, color: Colors.white),
+              title: const Text('Galerie', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(c, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null) return;
+    final picked = await _imagePicker.pickImage(
+      source: source, imageQuality: 80, maxWidth: 1200);
+    if (picked == null) return;
+    final local = await _copyPhotoToPermanentDir(picked.path);
+    final current = (wp['photos'] as List?)?.toList() ?? [];
+    current.add({'local': local, 'url': null});
+    wp['photos'] = current;
+    if (mounted) setState(() {});
+    refresh();
+  }
+
+  // Visualiseur plein écran (entry = {local, url}) avec bouton Supprimer.
+  Future<void> _openWaypointPhotoViewer({
+    required dynamic entry,
+    required VoidCallback onDelete,
+  }) async {
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      builder: (dctx) => Material(
+        type: MaterialType.transparency,
+        child: Stack(
+        children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: Center(child: photoWidget(entry, fit: BoxFit.contain)),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(dctx).padding.top + 12,
+            right: 12,
+            child: GestureDetector(
+              onTap: () => Navigator.of(dctx).pop(),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                child: const Icon(Icons.close, color: Colors.white, size: 22),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: MediaQuery.of(dctx).padding.bottom + 28,
+            left: 0, right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  Navigator.of(dctx).pop();
+                  onDelete();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.delete_outline, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text('Supprimer la photo',
+                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold, decoration: TextDecoration.none)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      )),
+    );
+  }
+
+  // Popup d'infos d'un point mémorisé (tap sur la pastille) — même contenu que
+  // l'écran de détail : numéro, heure, note, photos, coordonnées.
+  void _showWaypointPopup(Map<String, dynamic> wp, int number) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final photos = (wp['photos'] as List?)?.toList() ?? [];
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+                24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Container(
+                    width: 24, height: 24,
+                    alignment: Alignment.center,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF2563EB), shape: BoxShape.circle),
+                    child: Text('$number',
+                      style: const TextStyle(
+                        color: Colors.white, fontSize: 13,
+                        fontWeight: FontWeight.w800, height: 1)),
+                  ),
+                  const SizedBox(width: 10),
+                  Text('Point mémorisé — ${_formatWaypointTime(wp['timestamp'])}',
+                    style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                ]),
+                const SizedBox(height: 12),
+                // Note — modifiable au clic (placeholder si vide, pas de stylo).
+                GestureDetector(
+                  onTap: () => _editWaypointNote(wp, () => setSheetState(() {})),
+                  behavior: HitTestBehavior.opaque,
+                  child: (wp['note'] ?? '').toString().isNotEmpty
+                      ? Text(wp['note'],
+                          style: const TextStyle(fontSize: 15, color: Colors.white70))
+                      : const Text('Aucune note',
+                          style: TextStyle(fontSize: 15, color: Colors.white38, fontStyle: FontStyle.italic)),
+                ),
+                const SizedBox(height: 16),
+                // Photos (max 3) — tap pour agrandir/supprimer, tuile « + » pour ajouter.
+                Row(
+                  children: [
+                    Text('Photos  ${photos.length}/3',
+                      style: const TextStyle(fontSize: 12, color: Colors.white38)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 120,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    children: [
+                      for (final entry in photos)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Stack(
+                            children: [
+                              GestureDetector(
+                                onTap: () => _openWaypointPhotoViewer(
+                                  entry: entry,
+                                  onDelete: () async {
+                                    await _deletePhotoFromLiveWaypoint(wp, entry);
+                                    setSheetState(() {});
+                                  },
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: photoWidget(entry, width: 120, height: 120),
+                                ),
+                              ),
+                              // Croix de suppression — assez grande pour être visée.
+                              Positioned(
+                                top: 6, right: 6,
+                                child: GestureDetector(
+                                  onTap: () async {
+                                    await _deletePhotoFromLiveWaypoint(wp, entry);
+                                    setSheetState(() {});
+                                  },
+                                  child: Container(
+                                    width: 30, height: 30,
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(alpha: 0.6),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: Colors.white24),
+                                    ),
+                                    child: const Icon(Icons.close, size: 20, color: Colors.white),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (photos.length < 3)
+                        GestureDetector(
+                          onTap: () => _addPhotoToLiveWaypoint(wp, () => setSheetState(() {})),
+                          child: Container(
+                            width: 120, height: 120,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2A2A2A),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: const Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.add_a_photo, color: Colors.white38, size: 26),
+                                SizedBox(height: 6),
+                                Text('Ajouter', style: TextStyle(fontSize: 11, color: Colors.white38)),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text('Lat: ${(wp['lat'] as num).toStringAsFixed(6)}  Long: ${(wp['lng'] as num).toStringAsFixed(6)}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white38)),
+                const SizedBox(height: 8),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -3668,6 +4004,7 @@ class _RideScreenState extends State<RideScreen> {
       onMapReady: () {
         if (mounted) setState(() { mapReady = true; });
       },
+      onWaypointTap: _showWaypointPopup,
     );
   }
 
