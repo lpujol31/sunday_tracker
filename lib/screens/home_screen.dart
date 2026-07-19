@@ -9,6 +9,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
 import 'account_screen.dart';
+import 'settings_screen.dart';
+import '../services/altitude_reference_service.dart';
+import '../services/elevation_stats.dart';
+import '../services/interrupted_ride_service.dart';
 import '../services/photo_sync_service.dart';
 import '../services/pending_deletions_service.dart';
 import '../services/account_service.dart';
@@ -26,12 +30,12 @@ const Map<String, Map<String, dynamic>> kPracticeTypes = {
   'vtt': {
     'label': 'VTT',
     'color': Color(0xFF22C55E),
-    'icon': Icons.terrain,
+    'icon': Icons.landscape,
   },
   'enduro': {
     'label': 'Enduro',
     'color': Color(0xFFEF4444),
-    'icon': Icons.electric_bolt,
+    'icon': Icons.sports_motorsports,
   },
   'route': {
     'label': 'Vélo route',
@@ -83,8 +87,14 @@ const Map<String, Map<String, dynamic>> kPracticeTypes = {
 Map<String, dynamic> liveSessionRideJson(Map ride) => {
       'points': ride['points'],
       'waypoints': ride['waypoints'],
+      'startPoint': ride['startPoint'],
+      'endPoint': ride['endPoint'],
       'distanceMeters': ride['distanceMeters'],
       'durationSeconds': ride['durationSeconds'],
+      'pausedSeconds': ride['pausedSeconds'],
+      // Le live recalcule le dénivelé depuis les points : sans cet offset, il
+      // afficherait des altitudes 50 m plus hautes que le téléphone.
+      'altitudeOffsetMeters': ride['altitudeOffsetMeters'],
     };
 
 String detectPractice(Map ride) {
@@ -157,7 +167,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _searchQuery = '';
   Box? _ridesBox;
   bool _recovering = false;
-  bool _showOldRides = true;
+  bool _showOldRides = false;
   final AccountService _account = AccountService();
   bool _accountSaved = false;
 
@@ -253,9 +263,199 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       _initialSync();
     }
+    await _recomputeStoredElevations();
     // Rattrape en arrière-plan les photos pas encore montées sur le Storage
     // (offline-safe : sans réseau, ça ne fait rien et retentera au prochain lancement).
     syncPendingPhotos();
+    // Une sortie interrompue par un arrêt brutal (batterie à plat, crash) ?
+    await _checkInterruptedRide();
+  }
+
+  /// Au lancement, si la box `current_ride` contient encore des points, c'est
+  /// qu'une sortie ne s'est jamais terminée proprement (le téléphone s'est
+  /// éteint pendant le ride). On propose de la récupérer.
+  Future<void> _checkInterruptedRide() async {
+    final count = await InterruptedRideService.pendingCount();
+    if (count < 2 || !mounted) return;
+
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.restore, color: Color(0xFFFF9800)),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text('Sortie interrompue',
+                  style: TextStyle(color: Colors.white, fontSize: 18)),
+            ),
+          ],
+        ),
+        content: Text(
+          'Une sortie ne s\'est pas terminée normalement (batterie déchargée '
+          'ou app fermée). $count points GPS ont été retrouvés.\n\n'
+          'Veux-tu récupérer cette sortie ?',
+          style: const TextStyle(color: Colors.white70, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('discard'),
+            child: const Text('Supprimer',
+                style: TextStyle(color: Colors.white38)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Plus tard',
+                style: TextStyle(color: Colors.white54)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFFF9800)),
+            onPressed: () => Navigator.of(ctx).pop('recover'),
+            child: const Text('Récupérer'),
+          ),
+        ],
+      ),
+    );
+
+    if (action == 'discard') {
+      await InterruptedRideService.discard();
+      return;
+    }
+    if (action != 'recover') return; // « Plus tard » : on re-proposera au prochain lancement.
+
+    final ride = await InterruptedRideService.buildRecoveredRide();
+    if (ride == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Sortie inexploitable, désolé.')),
+        );
+      }
+      return;
+    }
+    await _ridesBox?.add(ride);
+    // Best-effort : pousse aussi la sortie récupérée sur Supabase.
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final startedAt = ride['startTime'] as String?;
+    if (userId != null && startedAt != null) {
+      try {
+        await Supabase.instance.client.from('rides').upsert(
+          {'user_id': userId, 'started_at': startedAt, 'ride_json': ride},
+          onConflict: 'user_id,started_at',
+        );
+      } catch (e) {
+        debugPrint('[SUPABASE] sync sortie récupérée: $e');
+      }
+    }
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sortie récupérée !')),
+      );
+    }
+  }
+
+  /// Migration : les sorties enregistrées avant le calcul filtré
+  /// (elevation_stats.dart) portent un D+ gonflé par les altitudes figées du
+  /// fused provider — jusqu'à un facteur 4,5. Leurs points sont intacts dans
+  /// `ride_json`, donc le dénivelé peut être refait à l'identique de ce que
+  /// produirait l'app aujourd'hui.
+  ///
+  /// On en profite pour caler les altitudes sur le niveau de la mer
+  /// (AltitudeReferenceService) : sans réseau l'appel ne rend rien, et la sortie
+  /// garde ses altitudes brutes plutôt qu'un recalage faux. Le drapeau n'est
+  /// alors PAS posé, pour retenter au prochain lancement.
+  ///
+  /// On réécrit Hive puis Supabase ; sans le second, le prochain pull-to-refresh
+  /// restaurerait les vieux chiffres.
+  Future<void> _recomputeStoredElevations() async {
+    final prefs = await SharedPreferences.getInstance();
+    // Le suffixe suit la version de l'algorithme : le monter force un nouveau
+    // recalcul sur les appareils qui avaient déjà tourné avec le précédent.
+    // v3 : hystérésis ramenée à 3 m (réglée contre un Garmin barométrique) et
+    // calage des altitudes sur le MNT IGN. Les appareils qui avaient déjà tourné
+    // en v2 portent des D+ trop bas de ~7 % et des altitudes non calées : sans
+    // ce changement de suffixe, ils les garderaient.
+    if (prefs.getBool('elevation_recomputed_v3') == true) {
+      debugPrint('[ELEV] deja fait (v3), rien a faire');
+      return;
+    }
+    final box = _ridesBox;
+    if (box == null) {
+      debugPrint('[ELEV] box Hive nulle, abandon');
+      return;
+    }
+    debugPrint('[ELEV] demarrage — ${box.length} sorties dans la box');
+
+    final reference = AltitudeReferenceService();
+    int fixed = 0;
+    bool allCalibrated = true;
+
+    for (int i = 0; i < box.length; i++) {
+      final stored = box.getAt(i);
+      if (stored is! Map) continue;
+      final ride = Map<String, dynamic>.from(stored.cast<String, dynamic>());
+      final points = ride['points'];
+      if (points is! List || points.length < 2) {
+        debugPrint('[ELEV] #$i "${ride['name']}" : pas de points, ignoree');
+        continue;
+      }
+
+      // Les sorties d'avant l'enregistrement de l'altitude n'ont rien à caler :
+      // les écarter AVANT de tenter un calage, sinon leur offset nul empêche à
+      // jamais de poser le drapeau — et la migration se rejoue à chaque
+      // lancement, réécrivant Hive et Supabase pour rien.
+      final raw = elevationStatsFromPoints(points);
+      if (raw.altStart == null) {
+        debugPrint('[ELEV] #$i "${ride['name']}" : aucune altitude, rien à faire');
+        continue;
+      }
+
+      // Un calage déjà obtenu est réutilisé tel quel : sans ça, une sortie non
+      // calable (trace hors de France, API en panne) ferait refaire TOUS les
+      // appels réseau au lancement suivant.
+      final known = (ride['altitudeOffsetMeters'] as num?)?.toDouble();
+      final offset = known ?? await reference.offsetForPoints(points);
+      if (offset == null) allCalibrated = false;
+
+      final stats = raw.shifted(offset);
+
+      debugPrint('[ELEV] #$i "${ride['name']}" : '
+          'D+ ${ride['totalElevationMeters']} -> ${stats.gain.toStringAsFixed(0)} | '
+          'altMax ${ride['altitudeMax']} -> ${stats.altMax?.toStringAsFixed(0)} | '
+          'offset ${offset?.toStringAsFixed(1) ?? "AUCUN"}');
+
+      ride['totalElevationMeters'] = stats.gain;
+      ride['totalElevationDown'] = stats.loss;
+      ride['altitudeStart'] = stats.altStart;
+      ride['altitudeEnd'] = stats.altEnd;
+      ride['altitudeMax'] = stats.altMax;
+      ride['altitudeMin'] = stats.altMin;
+      ride['altitudeOffsetMeters'] = offset;
+
+      await box.putAt(i, ride);
+      _syncRide(ride);
+      fixed++;
+    }
+
+    // Tant qu'une sortie n'a pas pu être calée faute de réseau, on repassera.
+    if (allCalibrated) {
+      await prefs.setBool('elevation_recomputed_v3', true);
+    }
+    debugPrint('[ELEV] termine — $fixed sortie(s) recalculee(s), '
+        'calage complet: $allCalibrated');
+    if (fixed > 0 && mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Dénivelé recalculé sur $fixed sortie'
+            '${fixed > 1 ? 's' : ''}.')),
+      );
+    }
   }
 
   // Upload une fois tous les rides Hive existants vers Supabase
@@ -450,28 +650,23 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         }
 
-        // D+ / D- / altitudes
-        double dPlus = 0, dMinus = 0;
-        double? altMin, altMax, altStart, altEnd;
-        for (int i = 0; i < positions.length; i++) {
-          final alt = positions[i]['altitude'] != null
-              ? (positions[i]['altitude'] as num).toDouble()
-              : null;
-          if (alt == null) continue;
-          altMin = altMin == null ? alt : min(altMin, alt);
-          altMax = altMax == null ? alt : max(altMax, alt);
-          if (i == 0) altStart = alt;
-          altEnd = alt;
-          if (i > 0) {
-            final prevAlt = positions[i - 1]['altitude'] != null
-                ? (positions[i - 1]['altitude'] as num).toDouble()
-                : null;
-            if (prevAlt != null) {
-              final diff = alt - prevAlt;
-              if (diff > 0) { dPlus += diff; } else { dMinus += diff.abs(); }
-            }
-          }
+        // D+ / D− / altitudes : même calcul filtré que pendant la sortie, sinon
+        // une sortie récupérée après crash n'affiche pas les mêmes chiffres que
+        // la même sortie sauvegardée normalement.
+        final samples = <ElevationSample>[];
+        for (final p in positions) {
+          final alt = p['altitude'];
+          final time = DateTime.tryParse(p['created_at'] as String? ?? '');
+          if (alt is! num || time == null) continue;
+          samples.add(ElevationSample(time, alt.toDouble()));
         }
+        final elevation = computeElevationStats(samples);
+        final dPlus = elevation.gain;
+        final dMinus = elevation.loss;
+        final altMin = elevation.altMin;
+        final altMax = elevation.altMax;
+        final altStart = elevation.altStart;
+        final altEnd = elevation.altEnd;
 
         // Durée — on utilise toujours la dernière position (created_at server UTC)
         // car ended_at était envoyé en heure locale sans offset = corrompu pour les anciennes sessions
@@ -658,8 +853,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Étiquette compteur (waypoints / photos) : teinte violette « contenu »,
   // reprise du dégradé signature de l'appli, distincte de l'orange des lieux.
-  Widget buildCountTag(IconData icon, int count, String label) {
-    const color = Color(0xFFC084FC);
+  Widget buildCountTag(IconData icon, int count, String label,
+      {bool archived = false}) {
+    final color = archived ? kArchivedGrey : const Color(0xFFC084FC);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
@@ -674,7 +870,7 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(width: 4),
           Text(
             '$count $label',
-            style: const TextStyle(
+            style: TextStyle(
               color: color,
               fontSize: 9,
               fontWeight: FontWeight.w700,
@@ -685,18 +881,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget buildTag(String text) {
+  Widget buildTag(String text, {bool archived = false}) {
+    final color = archived ? kArchivedGrey : Colors.orange;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.orange.withValues(alpha: 0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
       child: Text(
         text.toLowerCase(),
-        style: const TextStyle(
-          color: Colors.orange,
+        style: TextStyle(
+          color: color,
           fontSize: 9,
           fontWeight: FontWeight.w600,
         ),
@@ -704,9 +901,64 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Pastilles départ / arrivée : mêmes symboles et mêmes couleurs que la carte
+  // de détail et la timeline des points de passage (départ = flèche orange,
+  // arrivée = drapeau à damier violet).
+  static const Color kStartColor = Color(0xFFFF8A00);
+  static const Color kEndColor = Color(0xFF6D28D9);
+
+  // Sorties archivées (> 30 j) : les couleurs fonctionnelles (départ, arrivée,
+  // pratique, étiquettes) passent en nuances de gris, en cohérence avec la
+  // mini-carte désaturée. Gris texte/contour clair + gris de remplissage plus
+  // sombre pour les pastilles pleines (icône blanche lisible par-dessus).
+  static const Color kArchivedGrey = Color(0xFFAEB4BC);
+  static const Color kArchivedGreyFill = Color(0xFF787E86);
+
+  // Matrice de passage en niveaux de gris (luminance ITU-R BT.709). Sert à
+  // désaturer ce qu'un TextStyle.color ne peut pas teinter — typiquement les
+  // emojis d'une note — pour que les sorties archivées restent tout en gris.
+  static const List<double> _greyscaleMatrix = <double>[
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0, 0, 0, 1, 0,
+  ];
+
+  // Désature son enfant si [on] (sortie archivée) ; le laisse tel quel sinon.
+  static Widget _grey({required bool on, required Widget child}) => on
+      ? ColorFiltered(
+          colorFilter: const ColorFilter.matrix(_greyscaleMatrix),
+          child: child,
+        )
+      : child;
+
+  Widget buildStartDot({double size = 16, bool archived = false}) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: archived ? kArchivedGreyFill : kStartColor,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(Icons.play_arrow_rounded,
+            size: size * 0.72, color: Colors.white),
+      );
+
+  Widget buildEndDot({double size = 16, bool archived = false}) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: archived ? kArchivedGreyFill : kEndColor,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(Icons.sports_score_sharp,
+            size: size * 0.66, color: Colors.white),
+      );
+
   // Étiquette « lieu » (départ / arrivée) : icône + nom de commune, teinte
-  // dédiée (vert départ, rouge arrivée) pour se distinguer des #zones orange.
-  Widget buildPlaceTag(IconData icon, String place, Color color) {
+  // dédiée (orange départ, violet arrivée) pour se distinguer des #zones orange.
+  Widget buildPlaceTag(IconData icon, String place, Color color,
+      {bool archived = false}) {
+    if (archived) color = kArchivedGrey;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
@@ -736,13 +988,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget buildPracticeTag(
     String practiceKey,
     dynamic rideKey,
-    Box ridesBox,
-  ) {
+    Box ridesBox, {
+    bool archived = false,
+  }) {
     final practice = kPracticeTypes[practiceKey] ?? kPracticeTypes['vtt']!;
     final icon = practice['icon'] as IconData;
     final label = practice['label'] as String;
 
-    final Color tagColor = practice['color'] as Color;
+    final Color tagColor =
+        archived ? kArchivedGrey : practice['color'] as Color;
 
     return GestureDetector(
       onTap: () => _showPracticePicker(context, rideKey, ridesBox),
@@ -756,7 +1010,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 13, color: tagColor),
+            Icon(icon, size: 16, color: tagColor),
             const SizedBox(width: 5),
             Text(
               label,
@@ -857,7 +1111,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(icon, size: 16, color: color),
+                          Icon(icon, size: 22, color: color),
                           const SizedBox(width: 6),
                           Text(
                             label,
@@ -944,7 +1198,10 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ));
         } else if (value == 'delete') {
-          await deleteRide(context, ride, rideKey);
+          final confirmed = await confirmDeleteRide(context);
+          if (confirmed && context.mounted) {
+            await deleteRide(context, ride, rideKey);
+          }
         }
       },
       itemBuilder: (_) => [
@@ -1012,6 +1269,9 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0D0D0D),
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         toolbarHeight: 64,
         titleSpacing: 16,
         title: Row(
@@ -1047,6 +1307,17 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Paramètres',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
+            icon: const Icon(Icons.settings_outlined,
+                color: Colors.white70, size: 26),
+          ),
           IconButton(
             tooltip: 'Mon compte',
             onPressed: _openAccountScreen,
@@ -1402,20 +1673,22 @@ class _HomeScreenState extends State<HomeScreen> {
                     // sur une ligne pleine largeur sous la carte (téléphone).
                     final tagChildren = <Widget>[
                       if (wpCount > 0)
-                        buildCountTag(Icons.place, wpCount, 'WP'),
+                        buildCountTag(Icons.place, wpCount, 'WP',
+                            archived: isOld),
                       if (photoCount > 0)
                         buildCountTag(Icons.photo_camera, photoCount,
-                            photoCount > 1 ? 'photos' : 'photo'),
+                            photoCount > 1 ? 'photos' : 'photo',
+                            archived: isOld),
                       if (startCity.isNotEmpty)
-                        buildPlaceTag(Icons.trip_origin, startCity,
-                            const Color(0xFF22C55E)),
+                        buildPlaceTag(Icons.play_arrow_rounded, startCity,
+                            const Color(0xFFFF8A00), archived: isOld),
                       if (endCity.isNotEmpty && endCity != startCity)
-                        buildPlaceTag(Icons.sports_score, endCity,
-                            const Color(0xFFEF4444)),
+                        buildPlaceTag(Icons.sports_score_sharp, endCity,
+                            const Color(0xFFA78BFA), archived: isOld),
                       if ((ride['department'] ?? '').toString().isNotEmpty)
-                        buildTag('#${ride['department']}'),
+                        buildTag('#${ride['department']}', archived: isOld),
                       if ((ride['region'] ?? '').toString().isNotEmpty)
-                        buildTag('#${ride['region']}'),
+                        buildTag('#${ride['region']}', archived: isOld),
                     ];
 
                     // Durée compacte pour la carte téléphone : « 0:17:37 » → « 17:37 ».
@@ -1445,36 +1718,22 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: const Icon(Icons.delete, color: Colors.white),
                       ),
                       confirmDismiss: (direction) async {
-                        return await showDialog<bool>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            backgroundColor: const Color(0xFF1B1B1B),
-                            title: const Text('Supprimer la sortie'),
-                            content: const Text('Voulez-vous vraiment supprimer cette sortie ?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text('Annuler'),
-                              ),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                                onPressed: () => Navigator.pop(context, true),
-                                child: const Text('Supprimer'),
-                              ),
-                            ],
-                          ),
-                        );
+                        return await confirmDeleteRide(context);
                       },
                       onDismissed: (direction) async {
                         await deleteRide(context, ride, rideKey);
                       },
-                      child: Opacity(
-                        opacity: isOld ? 0.45 : 1.0,
-                        child: GestureDetector(
+                      child: GestureDetector(
                           onTap: openDetail,
                           child: Container(
                             margin: const EdgeInsets.only(bottom: 12),
                             padding: const EdgeInsets.all(14),
+                            // Sorties > 30 j (isOld) : la carte parente reste
+                            // strictement identique à une sortie récente (pas
+                            // d'assombrissement ni de contour). Le seul signal
+                            // d'ancienneté est le fond de mini-carte désaturé
+                            // (cf. RideTraceThumbnail archived) — le tracé et les
+                            // marqueurs restent en pleine couleur.
                             decoration: BoxDecoration(
                               color: const Color(0xFF1B1B1B),
                               borderRadius: BorderRadius.circular(20),
@@ -1490,18 +1749,28 @@ class _HomeScreenState extends State<HomeScreen> {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
                                       // ── Titre + menu ──
+                                      // Bouton ⋮ ancré en haut (start) pour rester
+                                      // aligné sur la 1re ligne du titre, que le
+                                      // titre tienne sur 1 ou 2 lignes (sinon il
+                                      // « tombe » au milieu d'un titre sur 2 lignes).
                                       Row(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Expanded(
-                                            child: Text(
-                                              ride['name'] ?? departureTime,
-                                              maxLines: 2,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.white,
+                                            child: Padding(
+                                              // Centre optiquement le titre sur la
+                                              // hauteur du bouton (36) quand il est
+                                              // sur une seule ligne.
+                                              padding: const EdgeInsets.only(top: 6),
+                                              child: Text(
+                                                ride['name'] ?? departureTime,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.white,
+                                                ),
                                               ),
                                             ),
                                           ),
@@ -1554,8 +1823,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 Row(
                                                   mainAxisAlignment: MainAxisAlignment.center,
                                                   children: [
-                                                    const Icon(Icons.flag,
-                                                        size: 11, color: Colors.orange),
+                                                    buildStartDot(size: 16, archived: isOld),
                                                     const SizedBox(width: 3),
                                                     Text(
                                                       departureTime,
@@ -1572,8 +1840,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                   Row(
                                                     mainAxisAlignment: MainAxisAlignment.center,
                                                     children: [
-                                                      const Icon(Icons.sports_score,
-                                                          size: 11, color: Color(0xFFEF4444)),
+                                                      buildEndDot(size: 16, archived: isOld),
                                                       const SizedBox(width: 3),
                                                       Text(
                                                         arrivalTime,
@@ -1600,6 +1867,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 points: ride['points'] ?? [],
                                                 width: double.infinity,
                                                 height: 118,
+                                                archived: isOld,
+                                                rideDate: startDate,
                                               ),
                                             ),
                                           ),
@@ -1629,30 +1898,35 @@ class _HomeScreenState extends State<HomeScreen> {
                                             ),
                                           ),
                                           const SizedBox(width: 8),
-                                          buildPracticeTag(practiceKey, rideKey, ridesBox),
+                                          buildPracticeTag(practiceKey, rideKey, ridesBox,
+                                              archived: isOld),
                                         ],
                                       ),
                                       if ((ride['note'] ?? '').toString().isNotEmpty) ...[
                                         const SizedBox(height: 8),
-                                        Row(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            const Icon(Icons.edit_note_rounded, size: 16, color: Colors.orange),
-                                            const SizedBox(width: 4),
-                                            Expanded(
-                                              child: Text(
-                                                (ride['note'] as String).trim(),
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: const TextStyle(
-                                                  fontSize: 12,
-                                                  color: Colors.orange,
-                                                  fontStyle: FontStyle.italic,
-                                                  height: 1.4,
+                                        _grey(
+                                          on: isOld,
+                                          child: Row(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Icon(Icons.edit_note_rounded, size: 16,
+                                                  color: isOld ? kArchivedGrey : Colors.orange),
+                                              const SizedBox(width: 4),
+                                              Expanded(
+                                                child: Text(
+                                                  (ride['note'] as String).trim(),
+                                                  maxLines: 2,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: isOld ? kArchivedGrey : Colors.orange,
+                                                    fontStyle: FontStyle.italic,
+                                                    height: 1.4,
+                                                  ),
                                                 ),
                                               ),
-                                            ),
-                                          ],
+                                            ],
+                                          ),
                                         ),
                                       ],
                                       if (hasTags) ...[
@@ -1723,7 +1997,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                           Row(
                                             mainAxisAlignment: MainAxisAlignment.center,
                                             children: [
-                                              const Icon(Icons.flag, size: 10, color: Colors.orange),
+                                              buildStartDot(size: 14, archived: isOld),
                                               const SizedBox(width: 2),
                                               Text(
                                                 departureTime,
@@ -1746,6 +2020,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                         points: ride['points'] ?? [],
                                         width: thumbW,
                                         height: thumbH,
+                                        archived: isOld,
+                                        rideDate: startDate,
                                       ),
                                     ),
                                     const SizedBox(width: 12),
@@ -1771,7 +2047,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                           Align(
                                             alignment: Alignment.centerLeft,
                                             child: buildPracticeTag(
-                                                practiceKey, rideKey, ridesBox),
+                                                practiceKey, rideKey, ridesBox,
+                                                archived: isOld),
                                           ),
                                           const SizedBox(height: 7),
                                           // Durée + distance : en Wrap pour que
@@ -1814,26 +2091,30 @@ class _HomeScreenState extends State<HomeScreen> {
                                           ),
                                           if ((ride['note'] ?? '').toString().isNotEmpty) ...[
                                             const SizedBox(height: 6),
-                                            Row(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                const Icon(Icons.edit_note_rounded,
-                                                    size: 14, color: Colors.orange),
-                                                const SizedBox(width: 4),
-                                                Expanded(
-                                                  child: Text(
-                                                    (ride['note'] as String).trim(),
-                                                    maxLines: 2,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: const TextStyle(
-                                                      fontSize: 12,
-                                                      color: Colors.orange,
-                                                      fontStyle: FontStyle.italic,
-                                                      height: 1.4,
+                                            _grey(
+                                              on: isOld,
+                                              child: Row(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Icon(Icons.edit_note_rounded,
+                                                      size: 14,
+                                                      color: isOld ? kArchivedGrey : Colors.orange),
+                                                  const SizedBox(width: 4),
+                                                  Expanded(
+                                                    child: Text(
+                                                      (ride['note'] as String).trim(),
+                                                      maxLines: 2,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        color: isOld ? kArchivedGrey : Colors.orange,
+                                                        fontStyle: FontStyle.italic,
+                                                        height: 1.4,
+                                                      ),
                                                     ),
                                                   ),
-                                                ),
-                                              ],
+                                                ],
+                                              ),
                                             ),
                                           ],
                                           // Tablette : étiquettes inline dans
@@ -1869,7 +2150,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                               ),
                                             ));
                                           } else if (value == 'delete') {
-                                            await deleteRide(context, ride, rideKey);
+                                            final confirmed = await confirmDeleteRide(context);
+                                            if (confirmed && context.mounted) {
+                                              await deleteRide(context, ride, rideKey);
+                                            }
                                           }
                                         },
                                         itemBuilder: (_) => [
@@ -1908,8 +2192,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                           ),
                         ),
-                      ),
-                    );
+                      );
                   }
 
                   return ListView(

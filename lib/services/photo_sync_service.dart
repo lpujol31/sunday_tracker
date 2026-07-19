@@ -159,8 +159,15 @@ Future<void> syncPendingPhotos() async {
       final waypoints = (ride['waypoints'] as List?) ?? const [];
       var changed = false;
 
-      for (final wp in waypoints) {
-        if (wp is! Map) continue;
+      // Départ / arrivée portent aussi des photos (map 'startPoint'/'endPoint') :
+      // on les traite avec les mêmes règles que les waypoints.
+      final photoHolders = <Map>[
+        ...waypoints.whereType<Map>(),
+        if (ride['startPoint'] is Map) ride['startPoint'] as Map,
+        if (ride['endPoint'] is Map) ride['endPoint'] as Map,
+      ];
+
+      for (final wp in photoHolders) {
         final rawPhotos = wp['photos'] as List?;
         if (rawPhotos == null) continue;
         // Normalise toute la liste (l'ancien format stockait des String) : on ne
@@ -213,8 +220,7 @@ Future<void> syncPendingPhotos() async {
       final sessionId = ride['safetySessionId'] as String?;
       if (sessionId != null) {
         var hasUploadedPhoto = false;
-        for (final wp in waypoints) {
-          if (wp is! Map) continue;
+        for (final wp in photoHolders) {
           for (final p in (wp['photos'] as List? ?? const [])) {
             if (photoUrl(p) != null) { hasUploadedPhoto = true; break; }
           }
@@ -226,8 +232,11 @@ Future<void> syncPendingPhotos() async {
               'ride_json': {
                 'points': ride['points'],
                 'waypoints': ride['waypoints'],
+                'startPoint': ride['startPoint'],
+                'endPoint': ride['endPoint'],
                 'distanceMeters': ride['distanceMeters'],
                 'durationSeconds': ride['durationSeconds'],
+                'pausedSeconds': ride['pausedSeconds'],
               },
             }).eq('id', sessionId);
             ride['wpLiveSynced'] = true;

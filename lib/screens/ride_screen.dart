@@ -6,13 +6,16 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 import 'package:share_plus/share_plus.dart';
-import '../services/share_image_service.dart';
+import '../services/altitude_reference_service.dart';
+import '../services/elevation_stats.dart';
 import '../services/photo_sync_service.dart';
+import '../services/ride_settings_service.dart';
 import '../utils/date_labels.dart';
 import '../utils/geo_labels.dart';
 import 'package:flutter/foundation.dart';
@@ -72,6 +75,7 @@ class _IsolatedMap extends StatelessWidget {
   final VoidCallback onMapReady;
   final void Function(MapEvent)? onMapEvent;
   final void Function(Map<String, dynamic> wp, int number)? onWaypointTap;
+  final VoidCallback? onStartTap;
 
   const _IsolatedMap({
     super.key,
@@ -86,6 +90,7 @@ class _IsolatedMap extends StatelessWidget {
     required this.onMapReady,
     this.onMapEvent,
     this.onWaypointTap,
+    this.onStartTap,
   });
 
   @override
@@ -156,6 +161,33 @@ class _IsolatedMap extends StatelessWidget {
                 ),
               ),
             ),
+            // Marqueur Départ (première position du tracé) — tappable pour lui
+            // ajouter note / photos, comme un point mémorisé. Dessiné au-dessus
+            // du point de position courant : au tout début ils se superposent,
+            // puis se séparent dès que la sortie avance.
+            if (rideIsStarted && ridePoints.isNotEmpty)
+              Marker(
+                point: ridePoints.first,
+                width: 30, height: 30,
+                child: GestureDetector(
+                  onTap: onStartTap,
+                  child: Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFFFF8A00),
+                      border: Border.all(color: Colors.white, width: 2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFFF8A00).withValues(alpha: 0.6),
+                          blurRadius: 8,
+                        ),
+                      ],
+                    ),
+                    child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 18),
+                  ),
+                ),
+              ),
             // Points de passage : même style que l'écran de détail — pastille
             // numérotée excentrée perpendiculairement à la trace, reliée par un
             // trait de rappel à un point posé sur la vraie position GPS.
@@ -327,6 +359,22 @@ class _RideScreenState extends State<RideScreen> {
   final List<Map<String, dynamic>> _uploadQueue = []; // points en attente d'upload Supabase
   Box? _currentRideBox; // Hive crash-safety
 
+  // ── Gestion batterie ──────────────────────────────────────────
+  // Seuils de charge (%) pilotant les trois paliers : avertissement discret,
+  // alerte critique + mode éco, puis finalisation automatique de la sortie avant
+  // que le téléphone ne s'éteigne (cf. ride perdu quand la batterie lâche).
+  static const int _kBatteryWarn = 20;
+  static const int _kBatteryCritical = 10;
+  static const int _kBatteryAutoSave = 5;
+  final Battery _battery = Battery();
+  Timer? _batteryTimer;
+  int? _batteryLevel;
+  bool _lowPowerMode = false; // GPS ralenti + écran libéré
+  bool _warnedLow = false; // palier 20 % franchi
+  bool _warnedCritical = false; // palier 10 % franchi
+  bool _autoSavedBattery = false; // finalisation 5 % déclenchée (une seule fois)
+  String? _batteryBannerMessage; // null = pas de bandeau affiché
+
   double totalDistance = 0;
   final Distance distanceCalculator = const Distance();
   String accuracy = '0';
@@ -357,14 +405,50 @@ class _RideScreenState extends State<RideScreen> {
   int _ignoredJitter = 0;   // bougé < max(5 m, précision) → gigue à l'arrêt
 
   final List<Map<String, dynamic>> rideWaypoints = [];
+  // Note + photos rattachées au point de Départ (édit. pendant la sortie via le
+  // marqueur orange). En mémoire comme les waypoints ; enrichie de lat/lng/heure
+  // et versée dans le ride à la sauvegarde (cf. saveRide → 'startPoint').
+  final Map<String, dynamic> _startPoint = {
+    'note': '',
+    'photos': <Map<String, dynamic>>[],
+  };
   final ImagePicker _imagePicker = ImagePicker();
 
   // ── Pause cockpit ─────────────────────────────────────────────
   DateTime? _pauseStartTime;
+  // Cumul des pauses terminées. rideStartTime reste l'heure réelle de départ ;
+  // la durée active se calcule en retranchant ce cumul (ne jamais décaler
+  // rideStartTime, sinon l'heure de départ enregistrée est fausse).
+  Duration _pausedTotal = Duration.zero;
+  // Point de passage créé automatiquement au clic sur Pause ; on garde la
+  // référence pour y écrire l'heure de reprise. Null si on n'a pas encore de
+  // position GPS au moment de la pause.
+  Map<String, dynamic>? _pauseWaypoint;
   DateTime? _lastGpsUpdateTime;
   String _gpsLabelBeforePause = 'Bon';
   Color _gpsColorBeforePause = const Color(0xFF4ade80);
   final List<double> _speedPoints = [];
+
+  // ── Mode automatique (détection pause / reprise) ──────────────
+  // Réglage lu au démarrage de la sortie (page Paramètres). Quand il est actif,
+  // l'app met la sortie en pause quand on s'arrête et la reprend quand on
+  // repart, sans intervention.
+  //
+  // Hystérésis : seuils d'entrée (2 km/h) et de sortie (5 km/h) différents +
+  // temporisations, pour ne pas osciller à un feu rouge ou dans une montée lente.
+  static const double _kAutoPauseSpeedKmh = 2.0;
+  static const double _kAutoResumeSpeedKmh = 5.0;
+  static const double _kAutoResumeDistanceM = 20.0;
+  static const Duration _kAutoPauseAfter = Duration(seconds: 25);
+  static const Duration _kAutoResumeAfter = Duration(seconds: 5);
+
+  bool _autoPauseEnabled = true; // lu dans startRide()
+  // true = la pause en cours a été déclenchée par l'auto-détection (vs le bouton
+  // Pause). Une pause manuelle coupe le GPS et n'est jamais reprise toute seule.
+  bool _autoPausedByApp = false;
+  DateTime? _stillSince; // depuis quand sous le seuil de pause (immobile)
+  DateTime? _movingSince; // depuis quand au-dessus du seuil de reprise
+  LatLng? _autoPausePoint; // position de référence au moment de la pause auto
 
   // ── Nom & note personnalisés ───────────────────────────────────
   String? _customRideName;
@@ -442,28 +526,41 @@ class _RideScreenState extends State<RideScreen> {
   double _dMinus = 0; // ← nouveau : D− cumulé
   double _slopePercent = 0;
   double _maxSlopePercent = 0;
-  double? _prevAltitude;
-  double? _prevDistance;
   int _speedSamples = 0;
   double _speedSum = 0;
 
-  // ── Altitude min/max et altitude de départ ─────────────────────
+  // ── Altitude min/max et départ (affichage live) ────────────────
+  // Non recalées sur le niveau de la mer : le calage demande le réseau et ne se
+  // fait qu'à la sauvegarde (cf. AltitudeReferenceService).
   double? _altStart;
   double _altMax = -double.infinity;
   double _altMin = double.infinity;
 
+  /// Profil d'altitude filtré (cf. elevation_stats.dart). C'est cette série
+  /// qu'on trace : le profil brut est un peigne de bruit de ±10 m.
+  List<double> _altSmoothed = [];
+
   // ── Temps en mouvement ─────────────────────────────────────────
+  // Seuil au-delà duquel on considère qu'on avance vraiment. À l'arrêt, le
+  // bruit GPS produit couramment 1 à 2 km/h : un seuil trop bas ferait passer
+  // les arrêts (feu rouge, photo) pour du mouvement.
+  static const double _kMovingSpeedKmh = 3.0;
   Duration _movingTime = Duration.zero;
   DateTime? _lastMovingTick;
 
-  // ── _updateSpeedAndElevation (version complète) ────────────────
-  void _updateSpeedAndElevation(Position position) {
+  // ── Vitesse ────────────────────────────────────────────────────
+  // Ne touche plus à l'altitude : le dénivelé est recalculé par
+  // _recomputeElevation() sur les seuls points effectivement gravés. Cette
+  // méthode-ci tourne sur *toutes* les positions du stream, y compris celles
+  // que les filtres (précision, aberration, anti-gigue) écartent ensuite — y
+  // cumuler le D+ revenait à compter le bruit d'altitude de l'immobilité.
+  void _updateSpeed(Position position) {
     final spd = (position.speed * 3.6).clamp(0.0, 200.0);
     _speedKmh = spd;
     _lastGpsUpdateTime = DateTime.now();
     _speedPoints.add(spd);
     if (spd > _maxSpeedKmh) _maxSpeedKmh = spd;
-    if (spd > 0.5) {
+    if (spd > _kMovingSpeedKmh) {
       _speedSum += spd;
       _speedSamples++;
       // Cumul temps en mouvement
@@ -476,29 +573,48 @@ class _RideScreenState extends State<RideScreen> {
       _lastMovingTick = null;
     }
     _avgSpeedKmh = _speedSamples > 0 ? _speedSum / _speedSamples : 0;
+  }
 
-    final alt = position.altitude;
+  // ── Dénivelé ───────────────────────────────────────────────────
+  /// Recalcule D+/D−/altitudes sur l'intégralité de la trace gravée, à chaque
+  /// nouveau point. Un cumul incrémental est impossible à filtrer correctement
+  /// (il faudrait connaître la suite pour lisser sans déphasage) ; un recalcul
+  /// complet reste négligeable — quelques milliers de points, quatre passes
+  /// linéaires — et garantit que le chiffre affiché pendant la sortie est
+  /// exactement celui qui sera enregistré à l'arrivée.
+  void _recomputeElevation() {
+    final stats = elevationStatsFromPoints(_pointsWithAlt);
+    _dPlus = stats.gain;
+    _dMinus = stats.loss;
+    _altStart = stats.altStart;
+    _altMax = stats.altMax ?? -double.infinity;
+    _altMin = stats.altMin ?? double.infinity;
+    _altSmoothed = stats.smoothed;
 
-    // Altitude de départ (première position)
-    _altStart ??= alt;
-
-    // Min / Max
-    if (alt > _altMax) _altMax = alt;
-    if (alt < _altMin) _altMin = alt;
-
-    if (_prevAltitude != null) {
-      final dAlt = alt - _prevAltitude!;
-      final dDist = totalDistance - (_prevDistance ?? 0);
-      if (dAlt > 0.5) _dPlus += dAlt; // D+
-      if (dAlt < -0.5) _dMinus += dAlt.abs(); // D−
-      if (dDist > 1) {
-        _slopePercent = (dAlt / dDist * 100).clamp(-45.0, 45.0);
-        if (_slopePercent.abs() > _maxSlopePercent)
+    // Pente instantanée : sur les derniers points lissés plutôt que d'un point
+    // à l'autre, où le bruit d'altitude produisait des pentes fantaisistes.
+    const window = 5;
+    if (_altSmoothed.length > window && _pointsWithAlt.length > window) {
+      final i = _altSmoothed.length - 1;
+      final j = i - window;
+      double dist = 0;
+      for (int k = j + 1; k <= i; k++) {
+        dist += distanceCalculator.as(
+          LengthUnit.Meter,
+          LatLng(_pointsWithAlt[k - 1]['lat'] as double,
+              _pointsWithAlt[k - 1]['lng'] as double),
+          LatLng(_pointsWithAlt[k]['lat'] as double,
+              _pointsWithAlt[k]['lng'] as double),
+        );
+      }
+      if (dist > 20) {
+        _slopePercent =
+            ((_altSmoothed[i] - _altSmoothed[j]) / dist * 100).clamp(-30.0, 30.0);
+        if (_slopePercent.abs() > _maxSlopePercent) {
           _maxSlopePercent = _slopePercent.abs();
+        }
       }
     }
-    _prevAltitude = alt;
-    _prevDistance = totalDistance;
   }
 
   Widget _elevRow(String label, String value, double progress, Color color) =>
@@ -1870,6 +1986,8 @@ class _RideScreenState extends State<RideScreen> {
   // ═══════════════════════════════════════════════════════════════
   Future<void> startRide({bool shareLink = false}) async {
     setState(() { rideIsStarted = true; _mapFullscreen = true; });
+    // Réglage « Mode automatique » (page Paramètres) figé pour toute la sortie.
+    _autoPauseEnabled = await RideSettingsService.isAutoPauseEnabled();
     await gpsInitializationStream?.cancel();
     gpsInitializationStream = null;
     if (_weatherFetched) _weatherSnapshotStart = _currentWeatherSnapshot();
@@ -1877,17 +1995,35 @@ class _RideScreenState extends State<RideScreen> {
     await createSafetySession();
     if (shareLink) await shareSafetyLink();
     rideStartTime = DateTime.now().toLocal();
+    _pausedTotal = Duration.zero;
+    _startRideTimer();
+    await startTracking();
+    _startBatteryMonitor();
+  }
+
+  /// Chrono : durée active = temps écoulé depuis le départ réel, moins les
+  /// pauses déjà terminées.
+  void _startRideTimer() {
+    rideTimer?.cancel();
     rideTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       Future.microtask(() {
         if (mounted)
           setState(() {
-            rideDuration = DateTime.now().difference(rideStartTime!);
+            rideDuration =
+                DateTime.now().difference(rideStartTime!) - _pausedTotal;
           });
       });
     });
-    await startTracking();
   }
+
+  /// Heure d'arrivée = départ réel + pauses + durée active.
+  /// • arrêt en roulant → vaut l'instant du STOP ;
+  /// • arrêt depuis une pause → vaut le début de cette pause (la pause finale
+  ///   non reprise n'est pas comptée). Cf. bug Arrivée faussée.
+  DateTime _rideEndTime() => (rideStartTime ?? DateTime.now())
+      .add(_pausedTotal)
+      .add(rideDuration);
 
   /// Une option de l'écran « Démarrer la sortie ».
   /// [primary] = true → style vert primaire (dernier choix mémorisé) ;
@@ -1983,7 +2119,7 @@ class _RideScreenState extends State<RideScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 15, color: selected ? color : Colors.white54),
+              Icon(icon, size: 21, color: selected ? color : Colors.white54),
               const SizedBox(width: 6),
               Text(
                 label,
@@ -2192,6 +2328,8 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> stopTrackingImmediately() async {
     rideTimer?.cancel();
+    _batteryTimer?.cancel();
+    _batteryTimer = null;
     await positionStream?.cancel();
     positionStream = null;
     safetyUploadTimer?.cancel();
@@ -2205,6 +2343,8 @@ class _RideScreenState extends State<RideScreen> {
 
   Future<void> discardRide() async {
     try {
+      _batteryTimer?.cancel();
+      _batteryTimer = null;
       safetyUploadTimer?.cancel();
       await positionStream?.cancel();
       rideTimer?.cancel();
@@ -2229,6 +2369,105 @@ class _RideScreenState extends State<RideScreen> {
     debugPrint('FOREGROUND SERVICE STARTED: $ok');
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // BATTERIE : avertissement 20 % · alerte + éco 10 % · sauvegarde auto 5 %
+  // ═══════════════════════════════════════════════════════════════
+  void _startBatteryMonitor() {
+    _batteryTimer?.cancel();
+    _checkBattery(); // premier relevé immédiat
+    _batteryTimer =
+        Timer.periodic(const Duration(seconds: 60), (_) => _checkBattery());
+  }
+
+  Future<void> _checkBattery() async {
+    if (!mounted || !rideIsStarted) return;
+    int level;
+    BatteryState state;
+    try {
+      level = await _battery.batteryLevel;
+      state = await _battery.batteryState;
+    } catch (_) {
+      return; // plateforme sans info batterie (ex. émulateur) : on n'en tient pas compte
+    }
+    if (!mounted) return;
+    final charging =
+        state == BatteryState.charging || state == BatteryState.full;
+    setState(() => _batteryLevel = level);
+
+    // Rebranché au chargeur : on lève les alertes et on sort du mode éco. Les
+    // paliers pourront se redéclencher si la charge rebaisse.
+    if (charging) {
+      if (_lowPowerMode) _exitLowPower();
+      if (_warnedLow || _warnedCritical || _batteryBannerMessage != null) {
+        setState(() {
+          _warnedLow = false;
+          _warnedCritical = false;
+          _batteryBannerMessage = null;
+        });
+      }
+      return;
+    }
+
+    // 5 % — finalisation automatique de la sortie (une seule fois). On ne veut
+    // pas déclencher pendant une pause : le ride est déjà figé côté tracking.
+    if (level <= _kBatteryAutoSave && !_autoSavedBattery && !rideIsPaused) {
+      _autoSavedBattery = true;
+      HapticFeedback.heavyImpact();
+      if (mounted) {
+        setState(() => _batteryBannerMessage =
+            'Batterie critique — sauvegarde automatique de la sortie…');
+      }
+      await saveRide(); // affiche son dialog de progression puis quitte l'écran
+      return;
+    }
+
+    // 10 % — alerte critique + mode économie.
+    if (level <= _kBatteryCritical && !_warnedCritical) {
+      _warnedCritical = true;
+      HapticFeedback.heavyImpact();
+      _enterLowPower();
+      setState(() => _batteryBannerMessage =
+          'Batterie $level % — mode éco activé. '
+          'Sauvegarde auto à $_kBatteryAutoSave %.');
+      return;
+    }
+
+    // 20 % — avertissement discret.
+    if (level <= _kBatteryWarn && !_warnedLow) {
+      _warnedLow = true;
+      HapticFeedback.mediumImpact();
+      setState(() => _batteryBannerMessage =
+          'Batterie $level % — pense à ménager la charge.');
+    }
+  }
+
+  /// Mode éco : on libère l'écran (première source de consommation, de loin) et
+  /// on ralentit le GPS. Le tracé continue, juste moins dense.
+  void _enterLowPower() async {
+    if (_lowPowerMode) return;
+    _lowPowerMode = true;
+    WakelockPlus.disable();
+    // Re-souscrit le flux GPS avec les réglages éco (lus dans startTracking).
+    // On garde le flux actif aussi pendant une pause AUTO : sans lui, la reprise
+    // ne serait plus détectée et la sortie resterait bloquée en pause.
+    await positionStream?.cancel();
+    positionStream = null;
+    if (rideIsStarted && (!rideIsPaused || _autoPausedByApp)) {
+      await startTracking();
+    }
+  }
+
+  void _exitLowPower() async {
+    if (!_lowPowerMode) return;
+    _lowPowerMode = false;
+    WakelockPlus.enable();
+    await positionStream?.cancel();
+    positionStream = null;
+    if (rideIsStarted && (!rideIsPaused || _autoPausedByApp)) {
+      await startTracking();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2244,6 +2483,7 @@ class _RideScreenState extends State<RideScreen> {
     positionStream?.cancel();
     gpsInitializationStream?.cancel();
     rideTimer?.cancel();
+    _batteryTimer?.cancel();
     _sunTimer?.cancel();
     _weatherTimer?.cancel();
     safetyUploadTimer?.cancel();
@@ -2342,9 +2582,11 @@ class _RideScreenState extends State<RideScreen> {
 
   String _formatWaypointTime(dynamic isoString) {
     if (isoString == null) return '--';
-    final dt = DateTime.tryParse(isoString);
+    // toLocal() : le point de Départ porte une heure UTC ; les waypoints, une
+    // heure déjà locale (toLocal no-op). Sans ça, l'heure s'affiche décalée.
+    final dt = DateTime.tryParse(isoString)?.toLocal();
     if (dt == null) return '--';
-    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    return _hhmm(dt);
   }
 
   // Retire une photo d'un point déjà mémorisé (pendant la sortie).
@@ -2359,6 +2601,23 @@ class _RideScreenState extends State<RideScreen> {
     () async {
       if (local != null) { try { await File(local).delete(); } catch (_) {} }
       if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
+    }();
+  }
+
+  // Supprime un point mémorisé (retire de la liste + nettoie ses photos).
+  Future<void> _deleteLiveWaypoint(Map<String, dynamic> wp) async {
+    final photos = ((wp['photos'] as List?) ?? const []).toList();
+    setState(() {
+      rideWaypoints.removeWhere((e) => identical(e, wp));
+    });
+    // Nettoyage disque + Storage en arrière-plan (non bloquant).
+    () async {
+      for (final entry in photos) {
+        final local = photoLocalPath(entry);
+        final url = photoUrl(entry);
+        if (local != null) { try { await File(local).delete(); } catch (_) {} }
+        if (url != null) { try { await deletePhotoRemote(url); } catch (_) {} }
+      }
     }();
   }
 
@@ -2664,6 +2923,179 @@ class _RideScreenState extends State<RideScreen> {
                 const SizedBox(height: 16),
                 Text('Lat: ${(wp['lat'] as num).toStringAsFixed(6)}  Long: ${(wp['lng'] as num).toStringAsFixed(6)}',
                   style: const TextStyle(fontSize: 12, color: Colors.white38)),
+                const SizedBox(height: 16),
+                // Suppression du point mémorisé (avec confirmation).
+                SizedBox(
+                  width: double.infinity,
+                  child: TextButton.icon(
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFFEF4444),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () async {
+                      final confirm = await showDialog<bool>(
+                        context: ctx,
+                        builder: (dctx) => AlertDialog(
+                          backgroundColor: const Color(0xFF1E1E1E),
+                          title: const Text('Supprimer ce point ?',
+                            style: TextStyle(color: Colors.white)),
+                          content: const Text(
+                            'Le point mémorisé et ses photos seront supprimés.',
+                            style: TextStyle(color: Colors.white70)),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(dctx).pop(false),
+                              child: const Text('Annuler',
+                                style: TextStyle(color: Colors.white70)),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(dctx).pop(true),
+                              child: const Text('Supprimer',
+                                style: TextStyle(color: Color(0xFFEF4444))),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirm != true) return;
+                      await _deleteLiveWaypoint(wp);
+                      if (ctx.mounted) Navigator.of(ctx).pop();
+                    },
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    label: const Text('Supprimer le point',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // Popup du point de Départ (tap sur le marqueur orange) : note + photos
+  // éditables, comme un point mémorisé. Opère sur `_startPoint` (en mémoire,
+  // versé dans le ride à la sauvegarde). Pas de bouton de suppression : on ne
+  // supprime pas le départ.
+  void _showStartPopup() {
+    // Ancre le point sur la 1re position connue + l'heure de départ.
+    if (ridePoints.isNotEmpty) {
+      _startPoint['lat'] = ridePoints.first.latitude;
+      _startPoint['lng'] = ridePoints.first.longitude;
+    }
+    _startPoint['timestamp'] ??= rideStartTime?.toUtc().toIso8601String();
+    final timeLabel = _formatWaypointTime(_startPoint['timestamp']);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final photos = (_startPoint['photos'] as List?)?.toList() ?? [];
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+                24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Container(
+                    width: 24, height: 24, alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF8A00).withValues(alpha: 0.15),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: const Color(0xFFFF8A00), width: 1.5),
+                    ),
+                    child: const Icon(Icons.play_arrow_rounded, size: 14, color: Color(0xFFFF8A00)),
+                  ),
+                  const SizedBox(width: 10),
+                  Text('Départ — $timeLabel',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                ]),
+                const SizedBox(height: 12),
+                // Note — modifiable au clic.
+                GestureDetector(
+                  onTap: () => _editWaypointNote(_startPoint, () => setSheetState(() {})),
+                  behavior: HitTestBehavior.opaque,
+                  child: (_startPoint['note'] ?? '').toString().isNotEmpty
+                      ? Text(_startPoint['note'],
+                          style: const TextStyle(fontSize: 15, color: Colors.white70))
+                      : const Text('Aucune note',
+                          style: TextStyle(fontSize: 15, color: Colors.white38, fontStyle: FontStyle.italic)),
+                ),
+                const SizedBox(height: 16),
+                Text('Photos  ${photos.length}/3',
+                  style: const TextStyle(fontSize: 12, color: Colors.white38)),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 120,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    children: [
+                      for (final entry in photos)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Stack(children: [
+                            GestureDetector(
+                              onTap: () => _openWaypointPhotoViewer(
+                                entry: entry,
+                                onDelete: () async {
+                                  await _deletePhotoFromLiveWaypoint(_startPoint, entry);
+                                  setSheetState(() {});
+                                },
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: photoWidget(entry, width: 120, height: 120),
+                              ),
+                            ),
+                            Positioned(
+                              top: 6, right: 6,
+                              child: GestureDetector(
+                                onTap: () async {
+                                  await _deletePhotoFromLiveWaypoint(_startPoint, entry);
+                                  setSheetState(() {});
+                                },
+                                child: Container(
+                                  width: 30, height: 30,
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.6),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.white24),
+                                  ),
+                                  child: const Icon(Icons.close, size: 20, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                          ]),
+                        ),
+                      if (photos.length < 3)
+                        GestureDetector(
+                          onTap: () => _addPhotoToLiveWaypoint(_startPoint, () => setSheetState(() {})),
+                          child: Container(
+                            width: 120, height: 120,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2A2A2A),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: const Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.add_a_photo, color: Colors.white38, size: 26),
+                                SizedBox(height: 6),
+                                Text('Ajouter', style: TextStyle(fontSize: 11, color: Colors.white38)),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 8),
               ],
             ),
@@ -3068,8 +3500,8 @@ class _RideScreenState extends State<RideScreen> {
                 child: ElevatedButton(
                   onPressed: () async {
                     await prefs.setBool(_prefKeyNotifyProches, notifyProches);
-                    if (notifyProches) await _shareRideEnd();
                     await saveRide();
+                    if (notifyProches) await _shareRideEnd();
                     if (!mounted) return;
                     nav.popUntil((route) => route.isFirst);
                   },
@@ -3133,45 +3565,7 @@ class _RideScreenState extends State<RideScreen> {
     final message =
         'Tout va bien, je suis de retour ! 🙌\n\nLa sortie est terminée — tu peux retrouver la trace ici :\n\n$url';
 
-    final rideSnap = _buildShareRideSnapshot();
-    final imageFile = await ShareImageService.generateImage(
-      context,
-      rideSnap,
-      rideSnap['name'] as String,
-    );
-
-    if (imageFile != null) {
-      await Share.shareXFiles(
-        [XFile(imageFile.path)],
-        text: message,
-        subject: 'Sunday Tracker',
-      );
-    } else {
-      await Share.share(message, subject: 'Sunday Tracker');
-    }
-  }
-
-  Map<String, dynamic> _buildShareRideSnapshot() {
-    final start = (rideStartTime ?? DateTime.now()).toLocal();
-    const months = ['jan','fév','mar','avr','mai','juin','juil','aoû','sep','oct','nov','déc'];
-    final autoName = 'Sortie du ${kFrDaysShort[start.weekday - 1]} ${start.day} ${months[start.month - 1]}';
-    return {
-      'name':                    _customRideName ?? autoName,
-      'startTime':               rideStartTime?.toUtc().toIso8601String(),
-      // Fin = début + durée active (et non l'heure du bouton STOP) : si on met
-      // en pause puis on arrête sans reprendre, DateTime.now() décalerait
-      // l'« Arrivée » de toute la pause finale. Cf. bug Arrivée faussée.
-      'endTime':                 (rideStartTime ?? DateTime.now()).add(rideDuration).toUtc().toIso8601String(),
-      'durationSeconds':         rideDuration.inSeconds,
-      'distanceMeters':          totalDistance,
-      'totalElevationMeters':    _dPlus,
-      'totalElevationDown':      _dMinus,
-      'altitudeMax':             _altMax.isInfinite ? null : _altMax,
-      'altitudeMin':             _altMin.isInfinite ? null : _altMin,
-      'points':                  _pointsWithAlt,
-      'city':                    null,
-      'practice':                null,
-    };
+    await Share.share(message, subject: 'Sunday Tracker');
   }
 
   Future<void> cancelRide() async {
@@ -3191,46 +3585,156 @@ class _RideScreenState extends State<RideScreen> {
     }
   }
 
+  // Point de passage automatique posé à la mise en pause (bouton ou
+  // auto-détection), à la dernière position connue. Sa note reçoit l'heure de
+  // pause, puis l'heure de reprise. `auto` distingue une pause détectée.
+  void _addPauseWaypoint(DateTime pausedAt, {bool auto = false}) {
+    final at = ridePoints.isNotEmpty
+        ? ridePoints.last
+        : () {
+            final lat = double.tryParse(latitude);
+            final lng = double.tryParse(longitude);
+            return (lat == null || lng == null) ? null : LatLng(lat, lng);
+          }();
+    if (at == null) return; // pas encore de fix GPS : rien à poser
+    final label = auto ? 'Pause auto' : 'Pause';
+    _pauseWaypoint = {
+      'lat': at.latitude,
+      'lng': at.longitude,
+      'note': '$label ${_hhmmss(pausedAt)}',
+      'timestamp': pausedAt.toIso8601String(),
+      'photos': <Map<String, dynamic>>[],
+    };
+    rideWaypoints.add(_pauseWaypoint!);
+  }
+
+  String _hhmm(DateTime dt) =>
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+  String _hhmmss(DateTime dt) =>
+      '${_hhmm(dt)}:${dt.second.toString().padLeft(2, '0')}';
+
+  /// Bouton Pause du cockpit : bascule manuelle. Une pause manuelle coupe le
+  /// GPS (éco batterie) et ne sera jamais reprise automatiquement.
   Future<void> togglePauseRide() async {
     if (!rideIsPaused) {
-      _pauseStartTime = DateTime.now();
-      _gpsLabelBeforePause = _gpsSignalLabel();
-      _gpsColorBeforePause = _gpsSignalColor();
-      await positionStream?.cancel();
-      positionStream = null;
-      rideTimer?.cancel();
-      safetyUploadTimer?.cancel();
-      _weatherTimer?.cancel();
-      _weatherTimer = null;
-      _sunTimer?.cancel();
-      _sunTimer = null;
-      _lastMovingTick = null;
-      setState(() {
-        rideIsPaused = true;
-      });
-      if (safetySessionId != null) {
-        await Supabase.instance.client
-            .from('safety_sessions')
-            .update({'status': 'paused'})
-            .eq('id', safetySessionId!);
+      await _enterPause(auto: false);
+    } else {
+      await _exitPause();
+    }
+  }
+
+  // ── Détection automatique pause / reprise ─────────────────────────
+  // Appelée sur chaque position du flux GPS (y compris pendant une pause AUTO,
+  // où le flux reste actif pour pouvoir détecter la reprise). Ne fait rien si le
+  // mode automatique est désactivé, ni pendant une pause manuelle.
+  void _handleAutoPause(Position position) {
+    if (!_autoPauseEnabled) return;
+    final now = DateTime.now();
+    final spd = (position.speed * 3.6).clamp(0.0, 200.0);
+
+    if (!rideIsPaused) {
+      // En roulage : candidat à la mise en pause si la vitesse reste basse
+      // suffisamment longtemps (temporisation anti-feu-rouge).
+      if (spd < _kAutoPauseSpeedKmh) {
+        _stillSince ??= now;
+        if (now.difference(_stillSince!) >= _kAutoPauseAfter) {
+          _autoPausePoint = LatLng(position.latitude, position.longitude);
+          _enterPause(auto: true);
+        }
+      } else {
+        _stillSince = null;
       }
       return;
     }
-    rideStartTime = DateTime.now().subtract(rideDuration);
-    rideTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      Future.microtask(() {
-        if (mounted)
-          setState(() {
-            rideDuration = DateTime.now().difference(rideStartTime!);
-          });
-      });
+
+    // En pause : ne réagir qu'aux pauses AUTO. Une pause manuelle attend un geste.
+    if (!_autoPausedByApp) return;
+
+    // Reprise : vitesse franche maintenue, OU on s'est clairement éloigné du
+    // point de pause (déplacement non ambigu → reprise immédiate).
+    final movedFar = _autoPausePoint != null &&
+        distanceCalculator.as(
+              LengthUnit.Meter,
+              _autoPausePoint!,
+              LatLng(position.latitude, position.longitude),
+            ) >
+            _kAutoResumeDistanceM;
+
+    if (spd > _kAutoResumeSpeedKmh || movedFar) {
+      _movingSince ??= now;
+      if (movedFar || now.difference(_movingSince!) >= _kAutoResumeAfter) {
+        _exitPause();
+      }
+    } else {
+      _movingSince = null;
+    }
+  }
+
+  /// Entrée en pause, manuelle ou automatique.
+  ///
+  /// Différence clé : une pause AUTO garde le flux GPS actif (indispensable pour
+  /// détecter la reprise), là où une pause manuelle le coupe pour économiser la
+  /// batterie. Dans les deux cas la distance et le D+ sont figés (le handler du
+  /// flux fait `if (rideIsPaused) return` avant de graver un point).
+  Future<void> _enterPause({required bool auto}) async {
+    _pauseStartTime = DateTime.now();
+    _gpsLabelBeforePause = _gpsSignalLabel();
+    _gpsColorBeforePause = _gpsSignalColor();
+    _autoPausedByApp = auto;
+    _stillSince = null;
+    _movingSince = null;
+    if (!auto) {
+      await positionStream?.cancel();
+      positionStream = null;
+    }
+    rideTimer?.cancel();
+    safetyUploadTimer?.cancel();
+    _weatherTimer?.cancel();
+    _weatherTimer = null;
+    _sunTimer?.cancel();
+    _sunTimer = null;
+    _lastMovingTick = null;
+    setState(() {
+      rideIsPaused = true;
+      _addPauseWaypoint(_pauseStartTime!, auto: auto);
     });
+    if (safetySessionId != null) {
+      await Supabase.instance.client
+          .from('safety_sessions')
+          .update({'status': 'paused'})
+          .eq('id', safetySessionId!);
+    }
+  }
+
+  /// Sortie de pause, manuelle ou automatique.
+  Future<void> _exitPause() async {
+    // Coupe la re-détection pendant la transition (des events du flux encore
+    // vivant après une pause auto ne doivent pas relancer _exitPause).
+    _autoPausedByApp = false;
+    _stillSince = null;
+    _movingSince = null;
+    _autoPausePoint = null;
+    if (_pauseStartTime != null) {
+      _pausedTotal += DateTime.now().difference(_pauseStartTime!);
+    }
+    _startRideTimer();
+    // Repart d'un flux propre : après une pause auto l'ancien flux est encore
+    // actif, on l'annule avant d'en resouscrire un (sinon deux flux en //).
+    await positionStream?.cancel();
+    positionStream = null;
     await startTracking();
     startSafetyUploadTimer();
     _startWeatherAndSunTimers();
     setState(() {
       rideIsPaused = false;
+      final wp = _pauseWaypoint;
+      if (wp != null) {
+        final note = (wp['note'] ?? '').toString().trim();
+        final reprise = 'Reprise ${_hhmmss(DateTime.now())}';
+        wp['note'] = note.isEmpty ? reprise : '$note · $reprise';
+        _pauseWaypoint = null;
+      }
     });
     if (safetySessionId != null) {
       await Supabase.instance.client
@@ -3256,6 +3760,8 @@ class _RideScreenState extends State<RideScreen> {
 
   // ── saveRide avec toutes les nouvelles clés ───────────────────
   Future<void> saveRide() async {
+    _batteryTimer?.cancel();
+    _batteryTimer = null;
     safetyUploadTimer?.cancel();
     safetyUploadTimer = null;
 
@@ -3339,21 +3845,31 @@ class _RideScreenState extends State<RideScreen> {
         : 'nuit';
     final autoName =
         'Sortie du $day ${start.day} ${months[start.month - 1]} ${start.year} · $moment';
+
+    // Calage des altitudes sur le niveau de la mer : le GPS mesure au-dessus de
+    // l'ellipsoïde WGS84, soit ~50 m trop haut en Ariège. Sans réseau, l'offset
+    // reste null et les altitudes restent brutes (la migration au prochain
+    // lancement rattrapera). Le D+ n'est pas concerné : le biais est constant.
+    final altOffset =
+        await AltitudeReferenceService().offsetForPoints(_pointsWithAlt);
+    final elevation =
+        elevationStatsFromPoints(_pointsWithAlt).shifted(altOffset);
+
     final rideData = <String, dynamic>{
       'name': _customRideName ?? autoName,
       'note': _rideNote,
       'startTime': rideStartTime?.toUtc().toIso8601String(),
-      // Fin = début + durée active (pas l'heure du STOP) : exclut une pause
-      // finale non reprise. Cf. bug Arrivée faussée.
-      'endTime': (rideStartTime ?? DateTime.now()).add(rideDuration).toUtc().toIso8601String(),
+      'endTime': _rideEndTime().toUtc().toIso8601String(),
       'durationSeconds': rideDuration.inSeconds,
+      'pausedSeconds': _pausedTotal.inSeconds,
       'distanceMeters': totalDistance,
-      'totalElevationMeters': _dPlus,
-      'totalElevationDown': _dMinus,
-      'altitudeStart': _altStart,
-      'altitudeEnd': _prevAltitude,
-      'altitudeMax': _altMax.isInfinite ? null : _altMax,
-      'altitudeMin': _altMin.isInfinite ? null : _altMin,
+      'totalElevationMeters': elevation.gain,
+      'totalElevationDown': elevation.loss,
+      'altitudeStart': elevation.altStart,
+      'altitudeEnd': elevation.altEnd,
+      'altitudeMax': elevation.altMax,
+      'altitudeMin': elevation.altMin,
+      'altitudeOffsetMeters': altOffset,
       'movingTimeSeconds': _movingTime.inSeconds,
       'maxSpeedKmh': _maxSpeedKmh,
       'avgSpeedKmh': _avgSpeedKmh,
@@ -3367,6 +3883,8 @@ class _RideScreenState extends State<RideScreen> {
       'region': locationTags['region'],
       'startCity': locationTags['startCity'],
       'endCity': locationTags['endCity'],
+      'startArea': locationTags['startArea'],
+      'endArea': locationTags['endArea'],
       'safetySessionId': safetySessionId,
       'safetyShareCode': safetyShareCode,
       'points': _pointsWithAlt,
@@ -3374,6 +3892,17 @@ class _RideScreenState extends State<RideScreen> {
     };
     // Pratique choisie manuellement au démarrage sinon détection auto.
     rideData['practice'] = _selectedPractice ?? detectPractice(rideData);
+    // Départ personnalisé : n'embarque 'startPoint' que s'il porte une note ou
+    // des photos, en le complétant lat/lng/heure pour l'écran de détail.
+    if ((_startPoint['note'] as String? ?? '').trim().isNotEmpty ||
+        (_startPoint['photos'] as List?)?.isNotEmpty == true) {
+      if (_pointsWithAlt.isNotEmpty) {
+        _startPoint['lat'] ??= _pointsWithAlt.first['lat'];
+        _startPoint['lng'] ??= _pointsWithAlt.first['lng'];
+      }
+      _startPoint['timestamp'] ??= rideStartTime?.toUtc().toIso8601String();
+      rideData['startPoint'] = _startPoint;
+    }
     try {
       await box.add(rideData);
     } catch (e) {
@@ -3412,12 +3941,18 @@ class _RideScreenState extends State<RideScreen> {
     positionStream =
         Geolocator.getPositionStream(
           locationSettings: LocationSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: kDebugMode ? 0 : 5,
+            // Mode éco (batterie basse) : précision réduite et filtre de distance
+            // élargi → moins de fixes, donc moins de conso. Le tracé reste correct.
+            accuracy:
+                _lowPowerMode ? LocationAccuracy.medium : LocationAccuracy.high,
+            distanceFilter: kDebugMode ? 0 : (_lowPowerMode ? 15 : 5),
           ),
         ).listen((Position position) {
-          if (rideIsPaused) return;
+          // Dernière position connue tenue à jour même en pause auto (le flux
+          // reste actif), et auto-détection pause/reprise avant tout filtrage.
           currentPosition = position;
+          _handleAutoPause(position);
+          if (rideIsPaused) return;
           final newPoint = LatLng(position.latitude, position.longitude);
           Future.microtask(() {
             if (!mounted) return;
@@ -3427,7 +3962,7 @@ class _RideScreenState extends State<RideScreen> {
               longitude = position.longitude.toString();
               altitude = position.altitude.toStringAsFixed(1);
               accuracy = position.accuracy.toStringAsFixed(1);
-              _updateSpeedAndElevation(position);
+              _updateSpeed(position);
             });
           });
           if (mapReady && _followPosition)
@@ -3480,6 +4015,7 @@ class _RideScreenState extends State<RideScreen> {
             'ts': position.timestamp.toUtc().toIso8601String(),
           };
           _pointsWithAlt.add(gpsPoint);
+          _recomputeElevation();
           _uploadQueue.add(gpsPoint);
           _currentRideBox?.add(gpsPoint);
           _lastPointTimestamp = position.timestamp;
@@ -3652,33 +4188,39 @@ class _RideScreenState extends State<RideScreen> {
       'ts': pos.timestamp.toUtc().toIso8601String(),
     };
     _pointsWithAlt.add(gpsPoint);
+    _recomputeElevation();
     _uploadQueue.add(gpsPoint);
     _currentRideBox?.add(gpsPoint);
   }
 
   Future<Map<String, String>> getRideLocationTags() async {
-    if (ridePoints.isEmpty) {
-      return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
-    }
+    const empty = {
+      'city': '', 'department': '', 'region': '',
+      'startCity': '', 'endCity': '', 'startArea': '', 'endArea': '',
+    };
+    if (ridePoints.isEmpty) return empty;
     try {
       final placemarks = await placemarkFromCoordinates(
         ridePoints.first.latitude,
         ridePoints.first.longitude,
       );
-      if (placemarks.isEmpty) {
-        return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
-      }
+      if (placemarks.isEmpty) return empty;
       final place = placemarks.first;
       final startCity = cityFromPlacemark(place);
-      // Ville d'arrivée : géocode le dernier point (peut être identique au départ
-      // sur une boucle). En cas d'échec on retombe sur la ville de départ.
+      final startArea = areaFromPlacemark(place);
+      // Arrivée : géocode le dernier point (peut être identique au départ sur
+      // une boucle). En cas d'échec on retombe sur le lieu de départ.
       String endCity = startCity;
+      String endArea = startArea;
       try {
         final endMarks = await placemarkFromCoordinates(
           ridePoints.last.latitude,
           ridePoints.last.longitude,
         );
-        if (endMarks.isNotEmpty) endCity = cityFromPlacemark(endMarks.first);
+        if (endMarks.isNotEmpty) {
+          endCity = cityFromPlacemark(endMarks.first);
+          endArea = areaFromPlacemark(endMarks.first);
+        }
       } catch (_) {}
       return {
         'city': startCity,
@@ -3686,9 +4228,11 @@ class _RideScreenState extends State<RideScreen> {
         'region': place.administrativeArea ?? '',
         'startCity': startCity,
         'endCity': endCity,
+        'startArea': startArea,
+        'endArea': endArea,
       };
     } catch (_) {
-      return {'city': '', 'department': '', 'region': '', 'startCity': '', 'endCity': ''};
+      return empty;
     }
   }
 
@@ -4005,6 +4549,7 @@ class _RideScreenState extends State<RideScreen> {
         if (mounted) setState(() { mapReady = true; });
       },
       onWaypointTap: _showWaypointPopup,
+      onStartTap: _showStartPopup,
     );
   }
 
@@ -4723,11 +5268,11 @@ class _RideScreenState extends State<RideScreen> {
             onTap: _showDetailSheet,
             behavior: HitTestBehavior.opaque,
             child: Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
+              margin: const EdgeInsets.only(bottom: 9),
+              padding: const EdgeInsets.symmetric(horizontal: 23, vertical: 12),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.72),
-                borderRadius: BorderRadius.circular(28),
+                borderRadius: BorderRadius.circular(26),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.4),
@@ -4738,12 +5283,12 @@ class _RideScreenState extends State<RideScreen> {
               child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.keyboard_arrow_up, color: Colors.white70, size: 23),
+                  Icon(Icons.keyboard_arrow_up, color: Colors.white70, size: 22),
                   SizedBox(width: 8),
                   Text(
                     'Afficher plus',
                     style: TextStyle(
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                       color: Colors.white,
                       decoration: TextDecoration.none,
@@ -4758,11 +5303,11 @@ class _RideScreenState extends State<RideScreen> {
         Container(
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.9),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(23)),
           ),
-          padding: EdgeInsets.fromLTRB(12, 12, 12, 14 + bottomPad),
+          padding: EdgeInsets.fromLTRB(12, 11, 12, 13 + bottomPad),
           child: SizedBox(
-            height: 74,
+            height: 69,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -4773,15 +5318,15 @@ class _RideScreenState extends State<RideScreen> {
                     await _showExitRideModal();
                   },
                   child: Container(
-                    width: 82,
+                    width: 77,
                     decoration: BoxDecoration(
                       color: const Color(0xFF1A1A1A),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(19),
                     ),
                     child: const Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.stop, color: Colors.red, size: 27),
+                        Icon(Icons.stop, color: Colors.red, size: 25),
                         SizedBox(height: 3),
                         Text(
                           'Stop',
@@ -4804,7 +5349,7 @@ class _RideScreenState extends State<RideScreen> {
                       backgroundColor: rideIsPaused ? Colors.green : Colors.blue,
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
+                        borderRadius: BorderRadius.circular(19),
                       ),
                     ),
                     onPressed: togglePauseRide,
@@ -4812,8 +5357,8 @@ class _RideScreenState extends State<RideScreen> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Container(
-                          width: 38,
-                          height: 38,
+                          width: 36,
+                          height: 36,
                           decoration: BoxDecoration(
                             color: Colors.white.withValues(alpha: 0.2),
                             shape: BoxShape.circle,
@@ -4823,7 +5368,7 @@ class _RideScreenState extends State<RideScreen> {
                                 ? Icons.play_arrow_rounded
                                 : Icons.pause_rounded,
                             color: Colors.white,
-                            size: 26,
+                            size: 24,
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -4834,7 +5379,7 @@ class _RideScreenState extends State<RideScreen> {
                               rideIsPaused ? 'Reprise' : 'Pause',
                               maxLines: 1,
                               style: const TextStyle(
-                                fontSize: 24,
+                                fontSize: 22,
                                 fontWeight: FontWeight.bold,
                                 color: Colors.white,
                                 decoration: TextDecoration.none,
@@ -4851,15 +5396,15 @@ class _RideScreenState extends State<RideScreen> {
                 GestureDetector(
                   onTap: () {},
                   child: Container(
-                    width: 82,
+                    width: 77,
                     decoration: BoxDecoration(
                       color: const Color(0xFFB71C1C),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(19),
                     ),
                     child: const Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.emergency, color: Colors.white, size: 27),
+                        Icon(Icons.emergency, color: Colors.white, size: 25),
                         SizedBox(height: 3),
                         Text(
                           'SOS',
@@ -4971,10 +5516,7 @@ class _RideScreenState extends State<RideScreen> {
   }
 
   Map<String, dynamic> _getLivePanelData() {
-    final altPoints = _pointsWithAlt
-        .map((p) => (p['alt'] as num?)?.toDouble())
-        .whereType<double>()
-        .toList();
+    final altPoints = List<double>.from(_altSmoothed);
     return {
       'rideIsPaused': rideIsPaused,
       'rideName': _rideStatusTitle(),
@@ -5026,21 +5568,23 @@ class _RideScreenState extends State<RideScreen> {
         onEditTitle: () => _showEditModal(focusNote: false),
         onEditNote: () => _showEditModal(focusNote: true),
         onEditPractice: _showPracticePicker,
-        onCopy: () {
+        onSharePosition: () async {
           final lat = double.tryParse(latitude);
           final lng = double.tryParse(longitude);
-          if (lat != null && lng != null) {
-            Clipboard.setData(ClipboardData(
-              text: '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}',
-            ));
-          }
+          if (lat == null || lng == null) return;
+          final coords =
+              '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
+          final maps = 'https://maps.google.com/?q=$lat,$lng';
+          await Share.share(
+            'Je suis ici :\n$coords\n\n$maps',
+            subject: 'Sunday Tracker — ma position',
+          );
         },
-        onOpen: () async {
-          if (safetyUrl != null) {
-            final uri = Uri.parse(safetyUrl!);
-            if (await canLaunchUrl(uri)) {
-              await launchUrl(uri, mode: LaunchMode.externalApplication);
-            }
+        onOpenLive: () async {
+          if (safetyUrl == null) return;
+          final uri = Uri.parse(safetyUrl!);
+          if (await canLaunchUrl(uri)) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
           }
         },
       ),
@@ -5074,7 +5618,7 @@ class _RideScreenState extends State<RideScreen> {
           child: Container(
             width: width,
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.52),
+              color: Colors.black,
               borderRadius: BorderRadius.circular(15),
               border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
             ),
@@ -5104,7 +5648,7 @@ class _RideScreenState extends State<RideScreen> {
                 filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
                 child: Container(
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.52),
+                    color: Colors.black,
                     borderRadius: BorderRadius.circular(18),
                     border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
                   ),
@@ -5157,9 +5701,63 @@ class _RideScreenState extends State<RideScreen> {
     ),
   );
 
-  // ═══════════════════════════════════════════════════════════════
-  // BUILD
-  // ═══════════════════════════════════════════════════════════════
+  /// Bandeau d'alerte batterie, affiché en haut de l'écran pendant le ride.
+  /// Rouge en dessous du seuil critique, orange pour le simple avertissement.
+  Widget _buildBatteryBanner(double safeTop) {
+    final critical = (_batteryLevel ?? 100) <= _kBatteryCritical;
+    return Positioned(
+      top: safeTop + 12,
+      left: 16,
+      right: 16,
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: critical ? const Color(0xFFC62828) : const Color(0xFFE65100),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.4),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Icon(
+                critical
+                    ? Icons.battery_alert_rounded
+                    : Icons.battery_2_bar_rounded,
+                color: Colors.white,
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _batteryBannerMessage!,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    height: 1.25,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () => setState(() => _batteryBannerMessage = null),
+                child: const Icon(Icons.close_rounded,
+                    color: Colors.white70, size: 18),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final safeTop = MediaQuery.of(context).padding.top;
@@ -5429,6 +6027,10 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ],
 
+          // Bandeau d'alerte batterie (avertissement / critique / sauvegarde).
+          if (rideIsStarted && _batteryBannerMessage != null)
+            _buildBatteryBanner(safeTop),
+
           // Cheat code debug GPS : 5 taps dans le coin haut-gauche.
           _buildDebugOverlay(),
         ],
@@ -5495,16 +6097,16 @@ class _SaveProgressDialog extends StatelessWidget {
 
 class _PauseSheetWidget extends StatefulWidget {
   final Map<String, dynamic> Function() liveGetter;
-  final VoidCallback onCopy;
-  final VoidCallback onOpen;
+  final VoidCallback onSharePosition;
+  final VoidCallback onOpenLive;
   final VoidCallback onEditTitle;
   final VoidCallback onEditNote;
   final VoidCallback onEditPractice;
 
   const _PauseSheetWidget({
     required this.liveGetter,
-    required this.onCopy,
-    required this.onOpen,
+    required this.onSharePosition,
+    required this.onOpenLive,
     required this.onEditTitle,
     required this.onEditNote,
     required this.onEditPractice,
@@ -5518,6 +6120,9 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
   Timer? _timer;
   Duration _pauseDuration = Duration.zero;
   late Map<String, dynamic> _live;
+
+  // Cartes secondaires (dénivelé / vitesse / conditions) repliées par défaut.
+  bool _showMoreInfo = false;
 
   static const double _minSize = 0.35;
   final DraggableScrollableController _sheetController =
@@ -5753,76 +6358,142 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
     final lng = double.tryParse(_live['longitude'] as String);
     final latStr = lat != null ? '${lat.toStringAsFixed(4)}° N' : '--';
     final lngStr = lng != null ? '${lng.toStringAsFixed(4)}°' : '--';
+    final hasLive = (_live['safetyUrl'] as String?) != null;
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _cardTitle(Icons.location_on_outlined, Colors.blue, 'Position & suivi'),
           const SizedBox(height: 12),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Dernière position connue',
-                      style: TextStyle(fontSize: 11, color: Colors.white38)),
-                    const SizedBox(height: 4),
-                    Text('$latStr · $lngStr',
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
-                    const SizedBox(height: 2),
-                    Text('Altitude : ${_live['altitude'] as String} m',
-                      style: const TextStyle(fontSize: 12, color: Colors.white54)),
-                    const SizedBox(height: 8),
-                    Row(children: [
-                      Container(width: 7, height: 7,
-                        decoration: const BoxDecoration(color: Color(0xFF4ade80), shape: BoxShape.circle)),
-                      const SizedBox(width: 5),
-                      Flexible(child: Text(
-                        'Lien de suivi actif · Dernière MAJ ${_fmtAgo(_live['lastGpsUpdateTime'] as DateTime?)}',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF4ade80)),
-                      )),
-                    ]),
-                  ],
-                ),
+          const Text('Dernière position connue',
+            style: TextStyle(fontSize: 11, color: Colors.white38)),
+          const SizedBox(height: 4),
+          Text('$latStr · $lngStr',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 2),
+          Text('Altitude : ${_live['altitude'] as String} m',
+            style: const TextStyle(fontSize: 12, color: Colors.white54)),
+          const SizedBox(height: 14),
+          _gradientShareBtn(),
+          const SizedBox(height: 12),
+          Row(children: [
+            Container(width: 7, height: 7,
+              decoration: BoxDecoration(
+                color: hasLive ? const Color(0xFF4ade80) : Colors.white38,
+                shape: BoxShape.circle,
+              )),
+            const SizedBox(width: 5),
+            Flexible(child: Text(
+              hasLive
+                ? 'Lien de suivi actif · Dernière MAJ ${_fmtAgo(_live['lastGpsUpdateTime'] as DateTime?)}'
+                : 'Aucun lien de suivi actif',
+              style: TextStyle(
+                fontSize: 11,
+                color: hasLive ? const Color(0xFF4ade80) : Colors.white38,
               ),
-              const SizedBox(width: 10),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _actionBtn(Icons.copy_outlined, 'Copier', Colors.blue, widget.onCopy),
-                  const SizedBox(height: 8),
-                  _actionBtn(Icons.open_in_new, 'Ouvrir', Colors.blue, widget.onOpen),
-                ],
-              ),
-            ],
-          ),
+            )),
+          ]),
         ],
       ),
     );
   }
 
-  Widget _actionBtn(IconData icon, String label, Color color, VoidCallback onTap) =>
-    GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: color.withValues(alpha: 0.30)),
+  // Bouton unique : ouvre un choix « partager ma position » / « ouvrir le live ».
+  Widget _gradientShareBtn() => GestureDetector(
+    onTap: _showPositionActions,
+    child: Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 13),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF7C3AED), Color(0xFFDB2777), Color(0xFFF97316)],
         ),
-        child: Row(
+      ),
+      child: const Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.ios_share, size: 18, color: Colors.white),
+          SizedBox(width: 10),
+          Text('Partager', style: TextStyle(
+            fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
+        ],
+      ),
+    ),
+  );
+
+  Future<void> _showPositionActions() async {
+    final hasLive = (_live['safetyUrl'] as String?) != null;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 13, color: color),
-            const SizedBox(width: 6),
-            Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 10),
+            Container(width: 36, height: 4, decoration: BoxDecoration(
+              color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 16),
+            _positionAction(
+              icon: Icons.my_location,
+              color: const Color(0xFF60a5fa),
+              title: 'Partager ma position GPS',
+              subtitle: 'Envoyer mes coordonnées actuelles',
+              onTap: () {
+                Navigator.of(ctx).pop();
+                widget.onSharePosition();
+              },
+            ),
+            _positionAction(
+              icon: Icons.open_in_new,
+              color: const Color(0xFF4ade80),
+              title: 'Ouvrir le live',
+              subtitle: hasLive
+                  ? 'Voir ma sortie sur Sunday Tracker Live'
+                  : 'Aucun lien de suivi actif',
+              enabled: hasLive,
+              onTap: () {
+                Navigator.of(ctx).pop();
+                widget.onOpenLive();
+              },
+            ),
+            const SizedBox(height: 10),
           ],
         ),
       ),
     );
+  }
+
+  Widget _positionAction({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+    bool enabled = true,
+  }) {
+    final c = enabled ? color : Colors.white24;
+    return ListTile(
+      onTap: enabled ? onTap : null,
+      leading: Container(
+        width: 40, height: 40,
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Icon(icon, size: 19, color: c),
+      ),
+      title: Text(title, style: TextStyle(
+        fontSize: 15, fontWeight: FontWeight.w600,
+        color: enabled ? Colors.white : Colors.white38)),
+      subtitle: Text(subtitle, style: const TextStyle(
+        fontSize: 12, color: Colors.white38)),
+    );
+  }
 
   // ── Dénivelé card ─────────────────────────────────────────────────────────
   Widget _buildDeniveleCard() {
@@ -6190,6 +6861,35 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
     );
   }
 
+  // ── Bouton « Plus d'infos » ───────────────────────────────────────────────
+  Widget _buildMoreInfoToggle() => GestureDetector(
+    onTap: () => setState(() => _showMoreInfo = !_showMoreInfo),
+    child: Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            _showMoreInfo ? Icons.expand_less : Icons.expand_more,
+            size: 18, color: Colors.white54,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _showMoreInfo ? 'Moins d\'infos' : 'Plus d\'infos',
+            style: const TextStyle(
+              fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white70),
+          ),
+        ],
+      ),
+    ),
+  );
+
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -6215,6 +6915,10 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
             SliverToBoxAdapter(child: _buildHeader()),
             SliverToBoxAdapter(child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: _buildNoteCard(),
+            )),
+            SliverToBoxAdapter(child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
               child: _buildResumeCard(),
             )),
             SliverToBoxAdapter(child: Padding(
@@ -6222,25 +6926,27 @@ class _PauseSheetWidgetState extends State<_PauseSheetWidget> {
               child: _buildPositionCard(),
             )),
             SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: _buildDeniveleCard(),
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: _buildMoreInfoToggle(),
             )),
-            SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: _buildVitesseCard(),
-            )),
-            SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: _buildConditionsCard(),
-            )),
-            SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: _buildNoteCard(),
-            )),
-            SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: _buildAlertesCard(),
-            )),
+            if (_showMoreInfo) ...[
+              SliverToBoxAdapter(child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: _buildDeniveleCard(),
+              )),
+              SliverToBoxAdapter(child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: _buildVitesseCard(),
+              )),
+              SliverToBoxAdapter(child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: _buildConditionsCard(),
+              )),
+              SliverToBoxAdapter(child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: _buildAlertesCard(),
+              )),
+            ],
             SliverToBoxAdapter(
                 child: SizedBox(
                     height: 40 + MediaQuery.of(context).padding.bottom)),

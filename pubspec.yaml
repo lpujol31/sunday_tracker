@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # Version app + build number interne.
 # Format build : YYYYMMDDNN, ex. 2026062501 = 1er build du 25/06/2026.
-version: 1.1.0+2026071103
+version: 1.1.0+2026071912
 
 
 environment:
@@ -92,6 +92,7 @@ dependencies:
   shared_preferences: ^2.3.3
 
   flutter_native_splash: ^2.4.3
+  battery_plus: ^7.1.1
 
 dev_dependencies:
   flutter_test:
