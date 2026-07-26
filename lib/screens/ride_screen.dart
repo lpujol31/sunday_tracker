@@ -16,8 +16,10 @@ import '../services/altitude_reference_service.dart';
 import '../services/elevation_stats.dart';
 import '../services/photo_sync_service.dart';
 import '../services/ride_settings_service.dart';
+import '../utils/auto_pause_profile.dart';
 import '../utils/date_labels.dart';
 import '../utils/geo_labels.dart';
+import '../utils/waypoint_kind.dart';
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
@@ -62,6 +64,104 @@ class _DashedBorderPainter extends CustomPainter {
   bool shouldRepaint(_DashedBorderPainter old) => old.color != color;
 }
 
+// ── Marqueur « recherche en cours » de la position courante ───────
+/// Icône location_searching magenta posée à même la trace — pas de pastille
+/// pleine — entourée de deux cercles concentriques qui s'étalent en boucle :
+/// le point courant reste repérable sans masquer le tracé.
+///
+/// Cercles en widgets + RepaintBoundary (surtout pas de CustomPaint dans un
+/// Marker flutter_map : ça laisse un fantôme gris au recalage caméra).
+class _PulsingPositionMarker extends StatefulWidget {
+  /// Cap en degrés quand on avance : le cœur devient une flèche orientée.
+  /// null (à l'arrêt) → cœur en icône de recherche GPS.
+  final double? headingDeg;
+
+  const _PulsingPositionMarker({this.headingDeg});
+
+  /// Côté du Marker : doit contenir l'onde à son extension maximale.
+  static const double size = 64;
+
+  @override
+  State<_PulsingPositionMarker> createState() => _PulsingPositionMarkerState();
+}
+
+class _PulsingPositionMarkerState extends State<_PulsingPositionMarker>
+    with SingleTickerProviderStateMixin {
+  static const Color _color = Color(0xFFD946EF);
+  static const double _core = 30;
+
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 2200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  /// Une onde : part du cœur et s'étale jusqu'au bord en s'effaçant.
+  /// [phase] décale la seconde onde d'un demi-cycle.
+  Widget _wave(double phase) {
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (context, _) {
+        final t = (_pulse.value + phase) % 1.0;
+        final d = _core + (_PulsingPositionMarker.size - _core) *
+            Curves.easeOutCubic.transform(t);
+        final fade = 1 - t;
+        return Container(
+          width: d,
+          height: d,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _color.withValues(alpha: 0.18 * fade),
+            border: Border.all(
+              color: _color.withValues(alpha: 0.55 * fade),
+              width: 2,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          _wave(0),
+          _wave(0.5),
+          if (widget.headingDeg == null)
+            const Stack(
+              alignment: Alignment.center,
+              children: [
+                // Liseré blanc : l'icône seule se perd sur les tuiles claires.
+                Icon(Icons.location_searching, color: Colors.white, size: 30),
+                Icon(Icons.location_searching, color: _color, size: 24),
+              ],
+            )
+          else
+            Transform.rotate(
+              angle: widget.headingDeg! * pi / 180,
+              child: const Stack(
+                alignment: Alignment.center,
+                children: [
+                  // Liseré blanc : la flèche seule se perd sur les tuiles claires.
+                  Icon(Icons.navigation, color: Colors.white, size: 33),
+                  Icon(Icons.navigation, color: _color, size: 26),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── Carte isolée — évite que les rebuilds du parent triggent didUpdateWidget ──
 class _IsolatedMap extends StatelessWidget {
   final MapController mapController;
@@ -72,6 +172,13 @@ class _IsolatedMap extends StatelessWidget {
   final List<Map<String, dynamic>> rideWaypoints;
   final String latitude;
   final String longitude;
+  /// Cap du repère de position en degrés (0 = nord), ou null si l'orientation
+  /// n'est pas exploitable → on retombe alors sur la pastille ronde.
+  final double? headingDeg;
+  /// Dernier zoom utilisé par l'utilisateur (restitué au premier affichage).
+  final double? savedZoom;
+  /// Couleur du tracé de la sortie en cours.
+  final Color traceColor;
   final VoidCallback onMapReady;
   final void Function(MapEvent)? onMapEvent;
   final void Function(Map<String, dynamic> wp, int number)? onWaypointTap;
@@ -87,6 +194,9 @@ class _IsolatedMap extends StatelessWidget {
     required this.rideWaypoints,
     required this.latitude,
     required this.longitude,
+    this.headingDeg,
+    this.savedZoom,
+    required this.traceColor,
     required this.onMapReady,
     this.onMapEvent,
     this.onWaypointTap,
@@ -102,7 +212,7 @@ class _IsolatedMap extends StatelessWidget {
           double.tryParse(latitude) ?? 48.8566,
           double.tryParse(longitude) ?? 2.3522,
         ),
-        initialZoom: rideIsStarted ? 15 : 14,
+        initialZoom: savedZoom ?? (rideIsStarted ? 15 : 14),
         onMapReady: onMapReady,
         onMapEvent: onMapEvent,
       ),
@@ -128,38 +238,30 @@ class _IsolatedMap extends StatelessWidget {
               Polyline(
                 points: ridePoints,
                 strokeWidth: 14,
-                color: Colors.orange.withValues(alpha: 0.25),
+                color: traceColor.withValues(alpha: 0.25),
               ),
               Polyline(
                 points: ridePoints,
                 strokeWidth: 6,
-                color: const Color(0xFFFFA726),
+                color: traceColor,
               ),
             ],
           ),
         MarkerLayer(
           markers: [
+            // Position courante — magenta #D946EF, la couleur intermédiaire du
+            // dégradé Départ (#FF8A00) → Arrivée (#6D28D9) utilisé partout.
+            // Flèche orientée quand on avance (le cap n'a de sens qu'en
+            // mouvement, cf. headingDeg), pastille cible à l'arrêt — dans les
+            // deux cas entourée des ondes de _PulsingPositionMarker.
             Marker(
               point: LatLng(
                 double.tryParse(latitude) ?? 48.8566,
                 double.tryParse(longitude) ?? 2.3522,
               ),
-              width: 24,
-              height: 24,
-              child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.red,
-                  border: Border.all(color: Colors.white, width: 2.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.red.withValues(alpha: 0.5),
-                      blurRadius: 8,
-                      spreadRadius: 1,
-                    ),
-                  ],
-                ),
-              ),
+              width: _PulsingPositionMarker.size,
+              height: _PulsingPositionMarker.size,
+              child: _PulsingPositionMarker(headingDeg: headingDeg),
             ),
             // Marqueur Départ (première position du tracé) — tappable pour lui
             // ajouter note / photos, comme un point mémorisé. Dessiné au-dessus
@@ -258,7 +360,10 @@ class _IsolatedMap extends StatelessWidget {
   /// Marker waypoint : pin flottant numéroté décalé perpendiculairement à la
   /// trace, relié par une fine ligne à un point posé sur sa vraie position GPS.
   Marker _waypointMarker(Map<String, dynamic> wp, int number) {
-    const color = Color(0xFF2563EB);
+    // Bleu = point mémorisé, orange = pause au bouton, orange + étincelle =
+    // pause détectée par le mode auto (cf. WaypointKind).
+    final kind = waypointKindOf(wp);
+    final color = kind.color;
     const lead = 30.0;
     const box = 120.0;
     const badge = 30.0;
@@ -315,12 +420,18 @@ class _IsolatedMap extends StatelessWidget {
                       BoxShadow(color: Colors.black.withValues(alpha: 0.45), blurRadius: 4),
                     ],
                   ),
-                  child: Text('$number',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: number >= 10 ? 13 : 16,
-                      fontWeight: FontWeight.w800,
-                      height: 1,
+                  // Étincelle en haut à droite si le point vient du mode auto.
+                  child: waypointBadgeContent(
+                    kind: kind,
+                    size: badge - 4, // hors bordure
+                    color: Colors.white,
+                    child: Text('$number',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: number >= 10 ? 13 : 16,
+                        fontWeight: FontWeight.w800,
+                        height: 1,
+                      ),
                     ),
                   ),
                 ),
@@ -434,21 +545,35 @@ class _RideScreenState extends State<RideScreen> {
   // l'app met la sortie en pause quand on s'arrête et la reprend quand on
   // repart, sans intervention.
   //
-  // Hystérésis : seuils d'entrée (2 km/h) et de sortie (5 km/h) différents +
-  // temporisations, pour ne pas osciller à un feu rouge ou dans une montée lente.
-  static const double _kAutoPauseSpeedKmh = 2.0;
-  static const double _kAutoResumeSpeedKmh = 5.0;
-  static const double _kAutoResumeDistanceM = 20.0;
-  static const Duration _kAutoPauseAfter = Duration(seconds: 25);
-  static const Duration _kAutoResumeAfter = Duration(seconds: 5);
+  // Hystérésis : seuils d'entrée et de sortie différents + temporisations, pour
+  // ne pas osciller à un feu rouge ou dans une montée lente. Les valeurs ne sont
+  // plus des constantes : elles viennent d'un profil calé sur la pratique (cf.
+  // auto_pause_profile.dart), résolu à la volée via `_autoPauseProfile`.
 
   bool _autoPauseEnabled = true; // lu dans startRide()
+  // Adapte les seuils à la pratique choisie (défaut). Lu dans startRide().
+  bool _adaptToPractice = true;
+
+  /// Profil de seuils actif. Résolu à la volée (et non figé) pour suivre un
+  /// changement de pratique via les chips en cours de sortie. Retombe sur le
+  /// jeu générique si l'adaptation est coupée ou la pratique inconnue / « Auto ».
+  AutoPauseProfile get _autoPauseProfile {
+    if (!_adaptToPractice) return kGenericAutoPauseProfile;
+    final key = _selectedPractice;
+    if (key == null) return kGenericAutoPauseProfile;
+    return kAutoPauseProfiles[key] ?? kGenericAutoPauseProfile;
+  }
   // true = la pause en cours a été déclenchée par l'auto-détection (vs le bouton
   // Pause). Une pause manuelle coupe le GPS et n'est jamais reprise toute seule.
   bool _autoPausedByApp = false;
-  DateTime? _stillSince; // depuis quand sous le seuil de pause (immobile)
+  DateTime? _lastMovingAt; // dernière preuve de mouvement (fix ou déplacement)
+  // La pause auto ne s'arme qu'au premier vrai mouvement de la sortie : entre le
+  // bouton Départ et le moment où on s'élance il se passe souvent une minute
+  // (lumières, fixation du téléphone) qui ne doit pas compter comme une pause.
+  bool _autoPauseArmed = false;
   DateTime? _movingSince; // depuis quand au-dessus du seuil de reprise
   LatLng? _autoPausePoint; // position de référence au moment de la pause auto
+  LatLng? _lastFixPoint; // position du fix précédent (détection de déplacement)
 
   // ── Nom & note personnalisés ───────────────────────────────────
   String? _customRideName;
@@ -464,13 +589,33 @@ class _RideScreenState extends State<RideScreen> {
   // ── Carte ──────────────────────────────────────────────────────
   static const String _prefKeyMapStyle = 'ride_map_style_index';
   static const String _prefKeyMapCollapsed = 'ride_map_collapsed';
+  static const String _prefKeyMapZoom = 'ride_map_zoom';
   static const String _prefKeyLastShare = 'ride_last_share_link';
   static const String _prefKeyNotifyProches = 'ride_notify_proches';
   static const String _prefKeyLastPractice = 'ride_last_practice';
+  static const String _prefKeyTraceColor = 'ride_trace_color';
   int _mapStyleIndex = 0;
   bool _mapFullscreen = false;
   bool _mapCollapsed = false;
   bool _followPosition = true;
+
+  // ── Couleur du tracé ───────────────────────────────────────────
+  // Palette proposée dans le sélecteur (6 max). L'orange #FFA726 est le défaut
+  // historique et reste en tête.
+  static const List<Color> _traceColorChoices = [
+    Color(0xFFFFA726), // orange (défaut)
+    Color(0xFF29B6F6), // bleu
+    Color(0xFF4ADE80), // vert
+    Color(0xFFEF4444), // rouge
+    Color(0xFF8B5CF6), // violet
+    Color(0xFF14B8A6), // turquoise
+  ];
+  Color _traceColor = _traceColorChoices.first;
+  bool _showColorPicker = false;
+  /// Dernier niveau de zoom utilisé sur la carte (persisté entre les sessions).
+  double? _savedZoom;
+  bool _zoomPrefLoaded = false;
+  Timer? _zoomSaveTimer;
   final List<Map<String, dynamic>> _mapStyles = [
     {
       'label': 'Satellite',
@@ -500,16 +645,67 @@ class _RideScreenState extends State<RideScreen> {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getInt(_prefKeyMapStyle) ?? 0;
     final collapsed = prefs.getBool(_prefKeyMapCollapsed) ?? false;
+    final zoom = prefs.getDouble(_prefKeyMapZoom);
+    final traceColorValue = prefs.getInt(_prefKeyTraceColor);
     if (mounted)
       setState(() {
         _mapStyleIndex = saved.clamp(0, _mapStyles.length - 1);
         _mapCollapsed = collapsed;
+        if (zoom != null) _savedZoom = zoom.clamp(3.0, 19.0);
+        if (traceColorValue != null) {
+          _traceColor = _traceColorChoices.firstWhere(
+            (c) => c.toARGB32() == traceColorValue,
+            orElse: () => _traceColorChoices.first,
+          );
+        }
       });
+    // Les prefs sont lues : on peut commencer à enregistrer les zooms de
+    // l'utilisateur (avant, on écraserait la valeur mémorisée par le défaut).
+    _zoomPrefLoaded = true;
+    // La carte peut déjà être construite (prefs asynchrones) : dans ce cas
+    // `initialZoom` a pris la valeur par défaut → on recale à la main.
+    _applySavedZoom();
+  }
+
+  /// Restitue le zoom mémorisé sur une carte déjà affichée.
+  void _applySavedZoom() {
+    final zoom = _savedZoom;
+    if (!mounted || !mapReady || zoom == null) return;
+    if ((mapController.camera.zoom - zoom).abs() < 0.01) return;
+    mapController.move(mapController.camera.center, zoom);
+  }
+
+  /// Mémorise le zoom courant (débounce : les gestes de pinch génèrent
+  /// beaucoup d'événements, inutile d'écrire dans les prefs à chaque frame).
+  void _onMapEvent(MapEvent event) {
+    if (!_zoomPrefLoaded) return;
+    final zoom = event.camera.zoom;
+    if (_savedZoom != null && (_savedZoom! - zoom).abs() < 0.01) return;
+    _savedZoom = zoom;
+    _zoomSaveTimer?.cancel();
+    _zoomSaveTimer = Timer(const Duration(milliseconds: 600), _flushZoomPref);
+  }
+
+  /// Écrit le zoom courant dans les prefs (fin de débounce, ou sortie d'écran
+  /// pour ne pas perdre un zoom fait juste avant de quitter).
+  Future<void> _flushZoomPref() async {
+    final zoom = _savedZoom;
+    if (zoom == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_prefKeyMapZoom, zoom);
   }
 
   Future<void> _saveMapStyle(int index) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_prefKeyMapStyle, index);
+  }
+
+  /// Change la couleur du tracé (appliquée en direct au ride en cours) et la
+  /// mémorise pour les prochaines sorties.
+  Future<void> _setTraceColor(Color color) async {
+    setState(() => _traceColor = color);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_prefKeyTraceColor, color.toARGB32());
   }
 
   Future<void> _toggleMapCollapsed() async {
@@ -573,6 +769,27 @@ class _RideScreenState extends State<RideScreen> {
       _lastMovingTick = null;
     }
     _avgSpeedKmh = _speedSamples > 0 ? _speedSum / _speedSamples : 0;
+  }
+
+  /// Cap à afficher sur le repère de position (degrés, 0 = nord), ou null si
+  /// l'orientation n'est pas exploitable → pastille ronde à la place.
+  ///
+  /// Le heading GPS n'a de sens qu'en mouvement : à l'arrêt il gèle sur sa
+  /// dernière valeur, voire renvoie 0. Et en release le flux se tait dès qu'on
+  /// ne bouge plus (cf. distanceFilter), donc `_speedKmh` reste lui aussi figé
+  /// sur le dernier fix — d'où le garde-fou de fraîcheur, réévalué à chaque
+  /// tick de `rideTimer`.
+  double? get _markerHeading {
+    if (!rideIsStarted || rideIsPaused) return null;
+    final heading = currentPosition?.heading;
+    if (heading == null || heading.isNaN || heading < 0) return null;
+    if (_speedKmh <= _kMovingSpeedKmh) return null;
+    final last = _lastGpsUpdateTime;
+    if (last == null ||
+        DateTime.now().difference(last) > const Duration(seconds: 5)) {
+      return null;
+    }
+    return heading;
   }
 
   // ── Dénivelé ───────────────────────────────────────────────────
@@ -856,12 +1073,18 @@ class _RideScreenState extends State<RideScreen> {
   double _bannerDragDeltaY = 0;
   double _bannerDragDeltaX = 0;
   final GlobalKey _cockpitControlsKey = GlobalKey();
+  // Dernière hauteur réelle mesurée des contrôles. La clé n'est montée que dans
+  // le corps (masqué) du Scaffold ; au 1er frame après le démarrage elle n'a pas
+  // encore de contexte → on retombait sur le fallback (trop haut) puis le
+  // cockpit sautait à sa vraie place. On mémorise la mesure pour éviter le saut.
+  double? _measuredControlsH;
 
   double get _cockpitControlsHeight {
     final ctx = _cockpitControlsKey.currentContext;
-    if (ctx == null) return 210 + MediaQuery.of(context).padding.bottom;
-    final box = ctx.findRenderObject() as RenderBox?;
-    return box?.size.height ?? 210 + MediaQuery.of(context).padding.bottom;
+    final box = ctx?.findRenderObject() as RenderBox?;
+    final h = box?.size.height;
+    if (h != null) _measuredControlsH = h;
+    return _measuredControlsH ?? 210 + MediaQuery.of(context).padding.bottom;
   }
 
   // ── Géométrie cockpit : blocs de boutons + cartouche latérale ──
@@ -1988,6 +2211,12 @@ class _RideScreenState extends State<RideScreen> {
     setState(() { rideIsStarted = true; _mapFullscreen = true; });
     // Réglage « Mode automatique » (page Paramètres) figé pour toute la sortie.
     _autoPauseEnabled = await RideSettingsService.isAutoPauseEnabled();
+    // L'adaptation à la pratique, elle, est relue via le profil à chaque tick :
+    // on fige juste la préférence utilisateur au démarrage.
+    _adaptToPractice = await RideSettingsService.isAdaptToPracticeEnabled();
+    _lastMovingAt = DateTime.now();
+    _lastFixPoint = null;
+    _autoPauseArmed = false;
     await gpsInitializationStream?.cancel();
     gpsInitializationStream = null;
     if (_weatherFetched) _weatherSnapshotStart = _currentWeatherSnapshot();
@@ -2007,6 +2236,7 @@ class _RideScreenState extends State<RideScreen> {
     rideTimer?.cancel();
     rideTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
+      _tickAutoPause();
       Future.microtask(() {
         if (mounted)
           setState(() {
@@ -2209,6 +2439,43 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
+  // Mention passive (non cliquable) sous les chips de pratique : résume en une
+  // ligne ce que la config fera des pauses pour cette sortie. L'adaptation se
+  // règle dans Paramètres — ici on informe, on n'agit pas.
+  Widget _startSheetAutoPauseHint({
+    required String? practice,
+    required bool autoOn,
+    required bool adapt,
+  }) {
+    final IconData icon;
+    final String text;
+    if (!autoOn) {
+      icon = Icons.pause_circle_outline;
+      text = 'Détection auto des pauses désactivée';
+    } else if (adapt &&
+        practice != null &&
+        kAutoPauseProfiles.containsKey(practice)) {
+      final label = kPracticeTypes[practice]?['label'] as String? ?? practice;
+      icon = Icons.tune_rounded;
+      text = 'Pauses auto adaptées · $label';
+    } else {
+      icon = Icons.tune_rounded;
+      text = 'Pauses auto · réglage standard';
+    }
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: Colors.white38),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(fontSize: 12, color: Colors.white38),
+          ),
+        ),
+      ],
+    );
+  }
+
   Future<void> _showStartRideSheet() async {
     bool loading = false;
     final prefs = await SharedPreferences.getInstance();
@@ -2217,6 +2484,10 @@ class _RideScreenState extends State<RideScreen> {
         _selectedPractice ?? prefs.getString(_prefKeyLastPractice);
     // Dernier choix mémorisé : true = « Partager et démarrer » (défaut).
     final bool sharePrimary = prefs.getBool(_prefKeyLastShare) ?? true;
+    // Réglages qui pilotent la mention passive sous les chips (cf. Paramètres).
+    final bool autoPauseOn = await RideSettingsService.isAutoPauseEnabled();
+    final bool adaptToPractice =
+        await RideSettingsService.isAdaptToPracticeEnabled();
     if (!mounted) return;
     await showModalBottomSheet(
       context: context,
@@ -2281,6 +2552,12 @@ class _RideScreenState extends State<RideScreen> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              _startSheetAutoPauseHint(
+                practice: selectedPractice,
+                autoOn: autoPauseOn,
+                adapt: adaptToPractice,
               ),
               const SizedBox(height: 20),
               _buildStartOption(
@@ -2378,6 +2655,16 @@ class _RideScreenState extends State<RideScreen> {
     _batteryTimer =
         Timer.periodic(const Duration(seconds: 60), (_) => _checkBattery());
   }
+
+  /// Copie du point GPS enrichie du niveau de batterie du téléphone, destinée
+  /// à l'upload `safety_positions` (le suiveur voit ainsi l'autonomie restante
+  /// sur la dernière position connue). On ne l'ajoute pas au point d'origine :
+  /// `ride_json.points` est dense (un point tous les 5 m) et n'a pas besoin de
+  /// porter cette info.
+  Map<String, dynamic> _withBattery(Map<String, dynamic> gpsPoint) => {
+        ...gpsPoint,
+        if (_batteryLevel != null) 'bat': _batteryLevel,
+      };
 
   Future<void> _checkBattery() async {
     if (!mounted || !rideIsStarted) return;
@@ -2486,6 +2773,8 @@ class _RideScreenState extends State<RideScreen> {
     _batteryTimer?.cancel();
     _sunTimer?.cancel();
     _weatherTimer?.cancel();
+    if (_zoomSaveTimer?.isActive ?? false) _flushZoomPref();
+    _zoomSaveTimer?.cancel();
     safetyUploadTimer?.cancel();
     WakelockPlus.disable();
     FlutterBackgroundService().invoke('stopService');
@@ -2800,6 +3089,7 @@ class _RideScreenState extends State<RideScreen> {
   // Popup d'infos d'un point mémorisé (tap sur la pastille) — même contenu que
   // l'écran de détail : numéro, heure, note, photos, coordonnées.
   void _showWaypointPopup(Map<String, dynamic> wp, int number) {
+    final kind = waypointKindOf(wp);
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -2820,15 +3110,21 @@ class _RideScreenState extends State<RideScreen> {
                   Container(
                     width: 24, height: 24,
                     alignment: Alignment.center,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF2563EB), shape: BoxShape.circle),
-                    child: Text('$number',
-                      style: const TextStyle(
-                        color: Colors.white, fontSize: 13,
-                        fontWeight: FontWeight.w800, height: 1)),
+                    decoration: BoxDecoration(
+                      color: kind.color,
+                      shape: BoxShape.circle,
+                    ),
+                    child: waypointBadgeContent(
+                      kind: kind, size: 24, color: Colors.white,
+                      child: Text('$number',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800, height: 1)),
+                    ),
                   ),
                   const SizedBox(width: 10),
-                  Text('Point mémorisé — ${_formatWaypointTime(wp['timestamp'])}',
+                  Text('${kind.label} — ${_formatWaypointTime(wp['timestamp'])}',
                     style: const TextStyle(
                       fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
                 ]),
@@ -3353,6 +3649,7 @@ class _RideScreenState extends State<RideScreen> {
           'longitude': p['lng'],
           'altitude': p['alt'],
           if (p['ts'] != null) 'created_at': p['ts'],
+          if (p['bat'] != null) 'battery_level': p['bat'],
         }).toList(),
       );
     } catch (e) {
@@ -3601,6 +3898,8 @@ class _RideScreenState extends State<RideScreen> {
     _pauseWaypoint = {
       'lat': at.latitude,
       'lng': at.longitude,
+      // `kind` = source de vérité pour l'affichage (la note, elle, est éditable).
+      'kind': auto ? 'pause_auto' : 'pause',
       'note': '$label ${_hhmmss(pausedAt)}',
       'timestamp': pausedAt.toIso8601String(),
       'photos': <Map<String, dynamic>>[],
@@ -3628,23 +3927,32 @@ class _RideScreenState extends State<RideScreen> {
   // Appelée sur chaque position du flux GPS (y compris pendant une pause AUTO,
   // où le flux reste actif pour pouvoir détecter la reprise). Ne fait rien si le
   // mode automatique est désactivé, ni pendant une pause manuelle.
+  //
+  // En roulage, ce handler ne fait qu'entretenir la date de dernière preuve de
+  // mouvement : la mise en pause elle-même est décidée par `_tickAutoPause()`
+  // (timer 1 s). Indispensable, car à l'arrêt le `distanceFilter` du flux GPS
+  // ne délivre plus aucune position — un compteur d'immobilité alimenté par le
+  // flux ne serait jamais mis à jour et la pause auto ne partirait jamais.
   void _handleAutoPause(Position position) {
     if (!_autoPauseEnabled) return;
     final now = DateTime.now();
     final spd = (position.speed * 3.6).clamp(0.0, 200.0);
+    final here = LatLng(position.latitude, position.longitude);
+    final profile = _autoPauseProfile;
 
     if (!rideIsPaused) {
-      // En roulage : candidat à la mise en pause si la vitesse reste basse
-      // suffisamment longtemps (temporisation anti-feu-rouge).
-      if (spd < _kAutoPauseSpeedKmh) {
-        _stillSince ??= now;
-        if (now.difference(_stillSince!) >= _kAutoPauseAfter) {
-          _autoPausePoint = LatLng(position.latitude, position.longitude);
-          _enterPause(auto: true);
-        }
-      } else {
-        _stillSince = null;
+      // Preuve de mouvement : vitesse au-dessus du seuil OU déplacement réel
+      // depuis le fix précédent (la vitesse du fused provider retombe parfois
+      // à 0 alors qu'on avance).
+      final moved =
+          _lastFixPoint != null &&
+          distanceCalculator.as(LengthUnit.Meter, _lastFixPoint!, here) >
+              profile.movedFixM;
+      if (spd >= profile.pauseSpeedKmh || moved) {
+        _lastMovingAt = now;
+        _autoPauseArmed = true;
       }
+      _lastFixPoint = here;
       return;
     }
 
@@ -3657,18 +3965,35 @@ class _RideScreenState extends State<RideScreen> {
         distanceCalculator.as(
               LengthUnit.Meter,
               _autoPausePoint!,
-              LatLng(position.latitude, position.longitude),
+              here,
             ) >
-            _kAutoResumeDistanceM;
+            profile.resumeDistanceM;
 
-    if (spd > _kAutoResumeSpeedKmh || movedFar) {
+    if (spd > profile.resumeSpeedKmh || movedFar) {
       _movingSince ??= now;
-      if (movedFar || now.difference(_movingSince!) >= _kAutoResumeAfter) {
+      if (movedFar || now.difference(_movingSince!) >= profile.resumeAfter) {
         _exitPause();
       }
     } else {
       _movingSince = null;
     }
+  }
+
+  /// Battement 1 s (timer de sortie) : déclenche la pause auto quand plus
+  /// aucune preuve de mouvement n'est arrivée depuis `profile.pauseAfter`.
+  ///
+  /// C'est ici — et pas dans le flux GPS — que la pause est décidée : à l'arrêt
+  /// le flux se tait (distanceFilter), donc l'absence de position EST le signal.
+  void _tickAutoPause() {
+    if (!_autoPauseEnabled || !rideIsStarted || rideIsPaused) return;
+    // Tant qu'on ne s'est pas élancé une première fois, aucune pause auto.
+    if (!_autoPauseArmed) return;
+    final last = _lastMovingAt ?? rideStartTime;
+    if (last == null) return;
+    if (DateTime.now().difference(last) < _autoPauseProfile.pauseAfter) return;
+    final pos = currentPosition;
+    _autoPausePoint = pos == null ? null : LatLng(pos.latitude, pos.longitude);
+    _enterPause(auto: true);
   }
 
   /// Entrée en pause, manuelle ou automatique.
@@ -3682,7 +4007,8 @@ class _RideScreenState extends State<RideScreen> {
     _gpsLabelBeforePause = _gpsSignalLabel();
     _gpsColorBeforePause = _gpsSignalColor();
     _autoPausedByApp = auto;
-    _stillSince = null;
+    _lastMovingAt = null;
+    _lastFixPoint = null;
     _movingSince = null;
     if (!auto) {
       await positionStream?.cancel();
@@ -3712,7 +4038,10 @@ class _RideScreenState extends State<RideScreen> {
     // Coupe la re-détection pendant la transition (des events du flux encore
     // vivant après une pause auto ne doivent pas relancer _exitPause).
     _autoPausedByApp = false;
-    _stillSince = null;
+    // Repart avec un crédit de mouvement plein, sinon le tick 1 s remettrait en
+    // pause immédiatement (aucune position reçue depuis la reprise).
+    _lastMovingAt = DateTime.now();
+    _lastFixPoint = null;
     _movingSince = null;
     _autoPausePoint = null;
     if (_pauseStartTime != null) {
@@ -3730,9 +4059,14 @@ class _RideScreenState extends State<RideScreen> {
       rideIsPaused = false;
       final wp = _pauseWaypoint;
       if (wp != null) {
+        final now = DateTime.now();
         final note = (wp['note'] ?? '').toString().trim();
-        final reprise = 'Reprise ${_hhmmss(DateTime.now())}';
+        final reprise = 'Reprise ${_hhmmss(now)}';
         wp['note'] = note.isEmpty ? reprise : '$note · $reprise';
+        // Heure de reprise en clair (même fuseau que `timestamp`) : rend la durée
+        // de la pause exploitable pour masquer les pauses très courtes sur la
+        // carte, sans dépendre du parsing de la note (éditable).
+        wp['resumedAt'] = now.toIso8601String();
         _pauseWaypoint = null;
       }
     });
@@ -3795,6 +4129,7 @@ class _RideScreenState extends State<RideScreen> {
               'longitude': p['lng'],
               'altitude': p['alt'],
               if (p['ts'] != null) 'created_at': p['ts'],
+              if (p['bat'] != null) 'battery_level': p['bat'],
             }).toList(),
           );
           _uploadQueue.removeRange(0, chunk.length);
@@ -4016,7 +4351,7 @@ class _RideScreenState extends State<RideScreen> {
           };
           _pointsWithAlt.add(gpsPoint);
           _recomputeElevation();
-          _uploadQueue.add(gpsPoint);
+          _uploadQueue.add(_withBattery(gpsPoint));
           _currentRideBox?.add(gpsPoint);
           _lastPointTimestamp = position.timestamp;
         });
@@ -4189,7 +4524,7 @@ class _RideScreenState extends State<RideScreen> {
     };
     _pointsWithAlt.add(gpsPoint);
     _recomputeElevation();
-    _uploadQueue.add(gpsPoint);
+    _uploadQueue.add(_withBattery(gpsPoint));
     _currentRideBox?.add(gpsPoint);
   }
 
@@ -4545,8 +4880,13 @@ class _RideScreenState extends State<RideScreen> {
       rideWaypoints: rideWaypoints,
       latitude: latitude,
       longitude: longitude,
+      headingDeg: _markerHeading,
+      savedZoom: _savedZoom,
+      traceColor: _traceColor,
+      onMapEvent: _onMapEvent,
       onMapReady: () {
         if (mounted) setState(() { mapReady = true; });
+        _applySavedZoom();
       },
       onWaypointTap: _showWaypointPopup,
       onStartTap: _showStartPopup,
@@ -4681,6 +5021,71 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
+  Widget _buildTraceColorPopup() {
+    return Container(
+      width: 168,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xF2101010),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08), width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.45),
+            blurRadius: 16,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Couleur du tracé',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+              decoration: TextDecoration.none,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final color in _traceColorChoices)
+                GestureDetector(
+                  onTap: () {
+                    _setTraceColor(color);
+                    setState(() => _showColorPicker = false);
+                  },
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: color.toARGB32() == _traceColor.toARGB32()
+                            ? Colors.white
+                            : Colors.transparent,
+                        width: 2.5,
+                      ),
+                    ),
+                    child: color.toARGB32() == _traceColor.toARGB32()
+                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        : null,
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // COCKPIT MODE
   // ═══════════════════════════════════════════════════════════════
@@ -4705,7 +5110,7 @@ class _RideScreenState extends State<RideScreen> {
 
     final isEdgeToEdge = topInset > 0;
     return Container(
-      padding: EdgeInsets.fromLTRB(16, topInset + 6, 16, 12),
+      padding: EdgeInsets.fromLTRB(12, topInset + 6, 12, 12),
       decoration: BoxDecoration(
         color: const Color(0xF2101010),
         borderRadius: isEdgeToEdge
@@ -4768,7 +5173,7 @@ class _RideScreenState extends State<RideScreen> {
             Container(
               width: 1,
               height: 28,
-              margin: const EdgeInsets.symmetric(horizontal: 10),
+              margin: const EdgeInsets.symmetric(horizontal: 6),
               color: Colors.white.withValues(alpha: 0.08),
             ),
 
@@ -4778,22 +5183,24 @@ class _RideScreenState extends State<RideScreen> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    formattedDistance(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      height: 1.0,
-                      letterSpacing: -0.5,
-                      decoration: noUnderline,
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      formattedDistance(),
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                        height: 1.0,
+                        letterSpacing: -0.5,
+                        decoration: noUnderline,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 2),
-                  Text('Distance', style: labelStyle, textAlign: TextAlign.center),
+                  Text('distance', style: labelStyle, textAlign: TextAlign.center),
                 ],
               ),
             ),
@@ -4801,7 +5208,7 @@ class _RideScreenState extends State<RideScreen> {
             Container(
               width: 1,
               height: 28,
-              margin: const EdgeInsets.symmetric(horizontal: 10),
+              margin: const EdgeInsets.symmetric(horizontal: 6),
               color: Colors.white.withValues(alpha: 0.08),
             ),
 
@@ -4825,7 +5232,7 @@ class _RideScreenState extends State<RideScreen> {
                     ),
                   ),
                   const SizedBox(height: 2),
-                  Text('Durée', style: labelStyle),
+                  Text('durée', style: labelStyle),
                 ],
               ),
             ),
@@ -4921,13 +5328,13 @@ class _RideScreenState extends State<RideScreen> {
               margin: const EdgeInsets.symmetric(vertical: 8),
               color: Colors.white.withValues(alpha: 0.08),
             ),
-            statSection(formattedDistance(), 'Distance'),
+            statSection(formattedDistance(), 'distance'),
             Container(
               height: 1,
               margin: const EdgeInsets.symmetric(vertical: 8),
               color: Colors.white.withValues(alpha: 0.08),
             ),
-            statSection(durationStr, 'Durée'),
+            statSection(durationStr, 'durée'),
           ],
         ),
       ),
@@ -5175,22 +5582,53 @@ class _RideScreenState extends State<RideScreen> {
         child: banner,
       );
     } else {
+      // Position basse : dépend de la hauteur réelle des contrôles. Tant qu'elle
+      // n'est pas mesurée (1er frame), on garde le bandeau invisible pour éviter
+      // qu'il s'affiche trop haut puis saute à sa vraie place.
+      final measured = _measuredControlsH != null;
+      if (!measured) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final box = _cockpitControlsKey.currentContext?.findRenderObject()
+              as RenderBox?;
+          if (box != null && _measuredControlsH != box.size.height) {
+            setState(() => _measuredControlsH = box.size.height);
+          }
+        });
+      }
       return Positioned(
         bottom: controlsH + 4,
         left: 12,
         right: 12,
-        child: banner,
+        child: Opacity(opacity: measured ? 1.0 : 0.0, child: banner),
       );
     }
   }
 
   Widget _buildCockpitMapButtons({double topOffset = 108}) {
-    return Positioned(
-      top: topOffset,
-      right: 12,
-      child: _dragFade(Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
+    return Stack(
+      children: [
+        // Barrière : referme le sélecteur de couleur au tap hors du popup.
+        if (_showColorPicker)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: () => setState(() => _showColorPicker = false),
+            ),
+          ),
+        // Popup « Couleur du tracé », ancré à gauche de la colonne de boutons.
+        if (_showColorPicker)
+          Positioned(
+            top: topOffset + 132,
+            right: 76,
+            child: _buildTraceColorPopup(),
+          ),
+        Positioned(
+          top: topOffset,
+          right: 12,
+          child: _dragFade(Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
           GestureDetector(
             onTap: () {
               if (_followPosition) {
@@ -5251,8 +5689,44 @@ class _RideScreenState extends State<RideScreen> {
               ),
             ),
           ),
-        ],
-      )),
+          // Sélecteur de couleur du tracé.
+          const SizedBox(height: 10),
+          GestureDetector(
+            onTap: () => setState(() => _showColorPicker = !_showColorPicker),
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: _showColorPicker
+                    ? _traceColor
+                    : Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.palette, color: Colors.white, size: 22),
+                  const SizedBox(height: 3),
+                  Container(
+                    width: 20,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: _traceColor,
+                      borderRadius: BorderRadius.circular(2),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        width: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+            ],
+          )),
+        ),
+      ],
     );
   }
 

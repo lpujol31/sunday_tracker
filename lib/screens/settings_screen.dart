@@ -20,6 +20,7 @@ const _kAccent = Color(0xFFFF8A00);
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoPause = true;
+  bool _adaptToPractice = true;
   bool _loading = true;
 
   @override
@@ -30,9 +31,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     final enabled = await RideSettingsService.isAutoPauseEnabled();
+    final adapt = await RideSettingsService.isAdaptToPracticeEnabled();
     if (!mounted) return;
     setState(() {
       _autoPause = enabled;
+      _adaptToPractice = adapt;
       _loading = false;
     });
   }
@@ -40,6 +43,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _toggleAutoPause(bool value) async {
     setState(() => _autoPause = value);
     await RideSettingsService.setAutoPauseEnabled(value);
+  }
+
+  Future<void> _toggleAdaptToPractice(bool value) async {
+    setState(() => _adaptToPractice = value);
+    await RideSettingsService.setAdaptToPracticeEnabled(value);
   }
 
   @override
@@ -78,6 +86,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           height: 1.45,
                         ),
                       ),
+                      const SizedBox(height: 18),
+                      _adaptToPracticeToggle(),
                       const SizedBox(height: 20),
                       _behaviorRow(
                         icon: Icons.pause_rounded,
@@ -167,6 +177,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
           inactiveTrackColor: const Color(0xFF3A3A3A),
         ),
       ],
+    );
+  }
+
+  // Sous-réglage : adapte les seuils de détection à la pratique en cours
+  // (marche, vélo route, VTT…). Grisé et inactif si le mode auto est coupé.
+  Widget _adaptToPracticeToggle() {
+    final dim = !_autoPause;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: (dim ? Colors.grey : _kAccent).withValues(alpha: 0.16),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.tune_rounded,
+                color: dim ? Colors.grey : _kAccent, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Adapter à ma pratique',
+                  style: TextStyle(
+                    color: dim ? Colors.white38 : Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Les seuils s\'ajustent selon la pratique (marche, vélo, VTT…) '
+                  'plutôt qu\'un réglage unique.',
+                  style: TextStyle(
+                    color: dim ? Colors.white24 : Colors.white54,
+                    fontSize: 12.5,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          Switch(
+            value: _adaptToPractice,
+            onChanged: dim ? null : _toggleAdaptToPractice,
+            activeThumbColor: Colors.white,
+            activeTrackColor: _kAccent,
+            inactiveThumbColor: Colors.white,
+            inactiveTrackColor: const Color(0xFF3A3A3A),
+          ),
+        ],
+      ),
     );
   }
 

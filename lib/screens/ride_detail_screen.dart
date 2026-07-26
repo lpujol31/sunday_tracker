@@ -4,8 +4,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback;
 import 'package:flutter_map/flutter_map.dart';
-import 'package:sunday_tracker/widgets/ride_share_card.dart';
+import 'package:sunday_tracker/utils/share_ride_live.dart';
 import 'package:sunday_tracker/utils/geo_labels.dart';
+import 'package:sunday_tracker/utils/waypoint_kind.dart';
 import 'package:sunday_tracker/screens/home_screen.dart' show kPracticeTypes, detectPractice;
 import 'package:sunday_tracker/services/elevation_stats.dart';
 import 'package:sunday_tracker/services/photo_sync_service.dart';
@@ -111,7 +112,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   static const double _kFloorSize = 0.01;
   // Padding bas de la liste du panneau (au-dessus de la marge système). Serré :
   // le mode étendu ajoute sa propre respiration en fin de liste (voir detailCards).
-  static const double _kListBottomPad = 6;
+  static const double _kListBottomPad = 24;
   // Amorce de la carte dénivelé laissée dépasser au palier intermédiaire : plutôt
   // qu'un bouton « + d'infos », on montre le haut de la carte suivante (bord
   // arrondi + titre « Dénivelé ») pour signaler qu'on peut faire glisser pour voir
@@ -453,11 +454,16 @@ class _RideDetailScreenState extends State<RideDetailScreen>
 
     // Construire la liste de timestamps par point
     List<DateTime?> times;
-    final firstTimeRaw = pts.first['time'] ?? pts.first['timestamp'];
+    // Les points gravés portent la clé 'ts' (cf. ride_screen). On accepte aussi
+    // 'time'/'timestamp' pour d'éventuels formats plus anciens. Sans cette clé,
+    // on retombait sur l'interpolation uniforme ci-dessous — qui suppose un pas
+    // de temps constant alors que les points sont espacés à la distance (tous
+    // les 5 m). Résultat : les segments rapides voyaient leur dt sous-estimé et
+    // leur vitesse gonflée (ex. 121 km/h réels affichés à 189,5 km/h).
+    final firstTimeRaw = pts.first['ts'] ?? pts.first['time'] ?? pts.first['timestamp'];
     if (firstTimeRaw != null) {
-      // Les points ont un champ time ou timestamp
       times = pts.map((p) {
-        final t = (p['time'] ?? p['timestamp']) as String?;
+        final t = (p['ts'] ?? p['time'] ?? p['timestamp']) as String?;
         return t != null ? DateTime.tryParse(t) : null;
       }).toList();
     } else {
@@ -478,7 +484,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
       final t1 = times[i - 1];
       final t2 = times[i];
       if (t1 == null || t2 == null) continue;
-      final dtS = t2.difference(t1).inSeconds.toDouble();
+      final dtS = t2.difference(t1).inMilliseconds / 1000.0;
       if (dtS <= 0) continue;
       final lat1 = (pts[i - 1]['lat'] as num).toDouble();
       final lon1 = (pts[i - 1]['lng'] as num).toDouble();
@@ -1019,17 +1025,26 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   }
 
   // Pastille d'en-tête d'un waypoint dans la popup (raccord avec le pin de la
-  // carte), repli sur l'icône si le rang est inconnu.
-  Widget _waypointBadge(int? number) => number != null
+  // carte : même couleur et même étincelle « auto »), repli sur l'icône si le
+  // rang est inconnu.
+  Widget _waypointBadge(int? number, [WaypointKind kind = WaypointKind.memo]) =>
+      number != null
       ? Container(
           width: 24, height: 24,
           alignment: Alignment.center,
-          decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle),
-          child: Text('$number',
-            style: const TextStyle(
-              color: Colors.white, fontSize: 13, fontWeight: FontWeight.w800, height: 1)),
+          decoration: BoxDecoration(
+            color: kind.color,
+            shape: BoxShape.circle,
+          ),
+          child: waypointBadgeContent(
+            kind: kind, size: 24, color: Colors.white,
+            child: Text('$number',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13, fontWeight: FontWeight.w800, height: 1)),
+          ),
         )
-      : const Icon(Icons.place, color: Colors.blue, size: 22);
+      : Icon(Icons.place, color: kind.color, size: 22);
 
   // Pastille d'en-tête départ / arrivée (mêmes couleurs que la timeline et les
   // marqueurs de la carte : départ orange, arrivée violet).
@@ -1265,7 +1280,10 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   /// pour contenir le décalage dans n'importe quelle direction. Seul le pin est
   /// cliquable (ouvre le popup) : le reste de la boîte laisse passer les taps.
   Marker _waypointMarker(Map wp, int number) {
-    const color = Color(0xFF2563EB); // bleu soutenu, bon contraste avec le blanc
+    // Bleu = point mémorisé, orange = pause au bouton, orange + étincelle =
+    // pause détectée par le mode auto (cf. WaypointKind).
+    final kind = waypointKindOf(wp);
+    final color = kind.color;
     const lead = 30.0;   // longueur du trait de rappel (px écran)
     const box = 120.0;
     const badge = 30.0;  // diamètre de la pastille numérotée
@@ -1312,24 +1330,31 @@ class _RideDetailScreenState extends State<RideDetailScreen>
               offset: tip,
               child: GestureDetector(
                 onTap: () => _showPointPopup(context, wp,
-                  badge: _waypointBadge(number),
-                  title: 'Point mémorisé — ${_formatWaypointTime(wp['timestamp'])}',
+                  badge: _waypointBadge(number, kind),
+                  title: '${kind.label} — ${_formatWaypointTime(wp['timestamp'])}',
                   deleteNumber: number),
                 child: Container(
                   width: badge, height: badge,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    color: color, shape: BoxShape.circle,
+                    color: color,
+                    shape: BoxShape.circle,
                     border: Border.all(color: Colors.white, width: 2),
                     boxShadow: [
                       BoxShadow(color: Colors.black.withValues(alpha: 0.45), blurRadius: 4),
                     ],
                   ),
-                  child: Text('$number',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: number >= 10 ? 13 : 16,
-                      fontWeight: FontWeight.w800, height: 1),
+                  // Étincelle en haut à droite si le point vient du mode auto.
+                  child: waypointBadgeContent(
+                    kind: kind,
+                    size: badge - 4, // hors bordure
+                    color: Colors.white,
+                    child: Text('$number',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: number >= 10 ? 13 : 16,
+                        fontWeight: FontWeight.w800, height: 1),
+                    ),
                   ),
                 ),
               ),
@@ -1400,8 +1425,12 @@ class _RideDetailScreenState extends State<RideDetailScreen>
             // PERPENDICULAIREMENT à la trace, relié par une fine ligne à un point
             // posé sur sa vraie position GPS — évite toute superposition avec les
             // markers structurels, même pour un WP proche de l'arrivée.
+            //
+            // Les pauses auto très courtes sont masquées ICI (carte seulement)
+            // pour la désencombrer ; elles restent dans la liste des points, d'où
+            // la numérotation calée sur l'index de la liste complète (`i + 1`).
             for (final (i, wp) in waypointsData.indexed)
-              _waypointMarker(wp, i + 1),
+              if (!isShortAutoPause(wp)) _waypointMarker(wp, i + 1),
           ]),
       ],
     );
@@ -1837,7 +1866,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         // timeline — plus de doublon départ/arrivée.
         if (isReduced || _activeTab == 0)
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
             child: _buildRouteTimeline(),
           ),
       ],
@@ -2393,6 +2422,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
     Color dotColor;
     Widget dotChild;
     String title;
+    final kind = item.type == _PassageType.waypoint && item.wp != null
+        ? waypointKindOf(item.wp!)
+        : WaypointKind.memo;
 
     switch (item.type) {
       case _PassageType.start:
@@ -2406,15 +2438,24 @@ class _RideDetailScreenState extends State<RideDetailScreen>
         title    = 'Arrivée';
         break;
       case _PassageType.waypoint:
+        // Bleu pour tous les points ; étincelle = détectée par le mode auto
+        // (même code que les pins de la carte).
         dotColor = const Color(0xFF60a5fa);
+        const numColor = Color(0xFF60a5fa);
         // Numéro du waypoint (raccord avec le pin numéroté sur la carte),
         // repli sur l'icône si le rang est indisponible.
-        dotChild = item.number != null
-            ? Text('${item.number}',
-                style: const TextStyle(
-                  fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF60a5fa), height: 1))
-            : const Icon(Icons.place, size: 12, color: Color(0xFF60a5fa));
-        title    = 'Point mémorisé';
+        dotChild = waypointBadgeContent(
+          kind: kind,
+          size: 23, // 26 px de pastille, moins la bordure de 1,5
+          color: numColor,
+          child: item.number != null
+              ? Text('${item.number}',
+                  style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700, color: numColor, height: 1))
+              : Icon(kind.isPause ? Icons.pause_rounded : Icons.place,
+                  size: 12, color: numColor),
+        );
+        title    = kind.label;
         break;
     }
 
@@ -2422,8 +2463,8 @@ class _RideDetailScreenState extends State<RideDetailScreen>
       onTap: switch (item.type) {
         _PassageType.waypoint when item.wp != null =>
           () => _showPointPopup(context, item.wp!,
-            badge: _waypointBadge(item.number),
-            title: 'Point mémorisé — ${item.time}',
+            badge: _waypointBadge(item.number, kind),
+            title: '$title — ${item.time}',
             deleteNumber: item.number),
         _PassageType.start => () => _showExtremityPopup(context, true),
         _PassageType.end   => () => _showExtremityPopup(context, false),
@@ -2434,6 +2475,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
           Container(
             width: 26, height: 26,
             decoration: BoxDecoration(
+              // Pastille creuse : style historique de la timeline.
               color: dotColor.withValues(alpha: 0.12),
               shape: BoxShape.circle,
               border: Border.all(color: dotColor, width: 1.5),
@@ -2447,7 +2489,24 @@ class _RideDetailScreenState extends State<RideDetailScreen>
           padding: EdgeInsets.only(bottom: isLast ? 8 : 0, top: 3),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+                // Puce « auto » : dit en toutes lettres ce que l'étincelle code
+                // graphiquement (pause détectée, pas déclenchée).
+                if (item.type == _PassageType.waypoint && kind.badgeLabel != null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: dotColor, width: 1),
+                    ),
+                    child: Text(kind.badgeLabel!,
+                      style: TextStyle(
+                        fontSize: 9, fontWeight: FontWeight.w700, height: 1.2, color: dotColor)),
+                  ),
+                ],
+              ]),
               Text(item.time, style: const TextStyle(fontSize: 11, color: Color(0xFF555555))),
             ]),
             // Lieu (départ / arrivée) : ville dans la couleur de l'extrémité,
@@ -2605,9 +2664,9 @@ class _RideDetailScreenState extends State<RideDetailScreen>
           ),
           const SizedBox(height: 10),
           _shareOption(
-            icon: Icons.image_outlined, iconColor: Colors.purple,
-            title: 'Partager un résumé',
-            subtitle: 'Image avec stats et trace GPS',
+            icon: Icons.play_circle_outline, iconColor: Colors.purple,
+            title: 'Partager le replay',
+            subtitle: 'Lien vers la carte animée et les stats',
             available: true,
             onTap: () { Navigator.pop(ctx); _shareRideImage(); },
           ),
@@ -2675,15 +2734,7 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   }
 
   void _shareRideImage() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => RideSharePreviewScreen(
-          ride: Map<String, dynamic>.from(widget.ride),
-          rideName: rideName,
-        ),
-      ),
-    );
+    shareRideLiveLink(context, widget.ride, rideName);
   }
 
   Future<void> exportAndShareGpx() async {

@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'package:flutter/foundation.dart' show kDebugMode, kProfileMode;
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -18,7 +19,7 @@ import '../services/pending_deletions_service.dart';
 import '../services/account_service.dart';
 import '../utils/date_labels.dart';
 import '../widgets/ride_trace_thumbnail.dart';
-import '../widgets/ride_share_card.dart';
+import '../utils/share_ride_live.dart';
 
 import 'package:intl/intl.dart';
 
@@ -1136,6 +1137,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // -------------------------------------------------------------------------
 
+  /// Mode de compilation du binaire installé. Utile pour lever un doute : des
+  /// réglages diffèrent entre debug et release (p. ex. le distanceFilter du flux
+  /// GPS), donc un test terrain n'a de valeur que si on sait sur quoi il porte.
+  String get _buildMode =>
+      kDebugMode ? 'debug' : (kProfileMode ? 'profile' : 'release');
+
   Future<void> loadAppVersion() async {
     final packageInfo = await PackageInfo.fromPlatform();
     final formattedDate = packageInfo.updateTime != null
@@ -1178,25 +1185,62 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Un item du menu ⋮ : icône dans une pastille teintée + libellé.
+  PopupMenuItem<String> _rideMenuItem({
+    required String value,
+    required IconData icon,
+    required Color accent,
+    required String label,
+    Color labelColor = Colors.white,
+  }) {
+    return PopupMenuItem<String>(
+      value: value,
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      child: Row(children: [
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: accent.withOpacity(0.16),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(icon, color: accent, size: 20),
+        ),
+        const SizedBox(width: 14),
+        Text(
+          label,
+          style: TextStyle(
+            color: labelColor,
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ]),
+    );
+  }
+
   // Menu ⋮ d'une carte (partager / supprimer). Extrait pour être réutilisé par
   // la carte téléphone sans dupliquer le bloc de la carte tablette.
   Widget _buildRideMenu(
       BuildContext context, Map ride, dynamic rideKey, String departureTime) {
     return PopupMenuButton<String>(
       tooltip: 'Actions',
-      color: const Color(0xFF1A1A1A),
+      color: const Color(0xFF1C1C1E),
+      elevation: 12,
+      shadowColor: Colors.black.withOpacity(0.6),
+      surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: Colors.white12, width: 1),
       ),
+      // Marge interne homogène : on gère l'espacement dans chaque item.
+      menuPadding: const EdgeInsets.symmetric(vertical: 6),
       position: PopupMenuPosition.under,
       onSelected: (value) async {
         if (value == 'share') {
-          Navigator.push(context, MaterialPageRoute(
-            builder: (_) => RideSharePreviewScreen(
-              ride: Map<String, dynamic>.from(ride),
-              rideName: (ride['name'] as String?) ?? departureTime,
-            ),
-          ));
+          shareRideLiveLink(
+            context, ride, (ride['name'] as String?) ?? departureTime);
         } else if (value == 'delete') {
           final confirmed = await confirmDeleteRide(context);
           if (confirmed && context.mounted) {
@@ -1205,21 +1249,19 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       },
       itemBuilder: (_) => [
-        const PopupMenuItem<String>(
+        _rideMenuItem(
           value: 'share',
-          child: Row(children: [
-            Icon(Icons.image_outlined, color: Colors.purple, size: 20),
-            SizedBox(width: 12),
-            Text('Partager un résumé', style: TextStyle(color: Colors.white)),
-          ]),
+          icon: Icons.play_arrow_rounded,
+          accent: const Color(0xFFB57BFF),
+          label: 'Partager le replay',
         ),
-        const PopupMenuItem<String>(
+        const PopupMenuDivider(height: 1),
+        _rideMenuItem(
           value: 'delete',
-          child: Row(children: [
-            Icon(Icons.delete_outline, color: Colors.red, size: 20),
-            SizedBox(width: 12),
-            Text('Supprimer la sortie', style: TextStyle(color: Colors.red)),
-          ]),
+          icon: Icons.delete_outline_rounded,
+          accent: const Color(0xFFFF5A5F),
+          label: 'Supprimer la sortie',
+          labelColor: const Color(0xFFFF5A5F),
         ),
       ],
       child: Container(
@@ -2134,59 +2176,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                     const SizedBox(width: 2),
                                     Padding(
                                       padding: const EdgeInsets.only(left: 4, top: 2),
-                                      child: PopupMenuButton<String>(
-                                        tooltip: 'Actions',
-                                        color: const Color(0xFF1A1A1A),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(14),
-                                        ),
-                                        position: PopupMenuPosition.under,
-                                        onSelected: (value) async {
-                                          if (value == 'share') {
-                                            Navigator.push(context, MaterialPageRoute(
-                                              builder: (_) => RideSharePreviewScreen(
-                                                ride: Map<String, dynamic>.from(ride),
-                                                rideName: (ride['name'] as String?) ?? departureTime,
-                                              ),
-                                            ));
-                                          } else if (value == 'delete') {
-                                            final confirmed = await confirmDeleteRide(context);
-                                            if (confirmed && context.mounted) {
-                                              await deleteRide(context, ride, rideKey);
-                                            }
-                                          }
-                                        },
-                                        itemBuilder: (_) => [
-                                          const PopupMenuItem<String>(
-                                            value: 'share',
-                                            child: Row(children: [
-                                              Icon(Icons.image_outlined, color: Colors.purple, size: 20),
-                                              SizedBox(width: 12),
-                                              Text('Partager un résumé',
-                                                  style: TextStyle(color: Colors.white)),
-                                            ]),
-                                          ),
-                                          const PopupMenuItem<String>(
-                                            value: 'delete',
-                                            child: Row(children: [
-                                              Icon(Icons.delete_outline, color: Colors.red, size: 20),
-                                              SizedBox(width: 12),
-                                              Text('Supprimer la sortie',
-                                                  style: TextStyle(color: Colors.red)),
-                                            ]),
-                                          ),
-                                        ],
-                                        child: Container(
-                                          width: 36,
-                                          height: 36,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: const Color(0xFF232323),
-                                            border: Border.all(color: Colors.white24, width: 1),
-                                          ),
-                                          child: const Icon(Icons.more_vert, color: Colors.white70, size: 20),
-                                        ),
-                                      ),
+                                      child: _buildRideMenu(
+                                          context, ride, rideKey, departureTime),
                                     ),
                                   ],
                                 ),
@@ -2261,15 +2252,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
             const SizedBox(height: 8),
             GestureDetector(
-              onTap: _buildDate == null
-                  ? null
-                  : () => ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Compilé le $_buildDate'),
-                          duration: const Duration(seconds: 2),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      ),
+              onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    _buildDate == null
+                        ? 'Build $_buildMode'
+                        : 'Compilé le $_buildDate · $_buildMode',
+                  ),
+                  duration: const Duration(seconds: 3),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              ),
               child: Text(
                 appVersion,
                 style: const TextStyle(
