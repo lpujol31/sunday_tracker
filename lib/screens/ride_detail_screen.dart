@@ -1280,8 +1280,8 @@ class _RideDetailScreenState extends State<RideDetailScreen>
   /// pour contenir le décalage dans n'importe quelle direction. Seul le pin est
   /// cliquable (ouvre le popup) : le reste de la boîte laisse passer les taps.
   Marker _waypointMarker(Map wp, int number) {
-    // Bleu = point mémorisé, orange = pause au bouton, orange + étincelle =
-    // pause détectée par le mode auto (cf. WaypointKind).
+    // Bleu pour tous les points de passage ; l'étincelle en puce au bord de la
+    // pastille = pause détectée par le mode auto (cf. WaypointKind).
     final kind = waypointKindOf(wp);
     final color = kind.color;
     const lead = 30.0;   // longueur du trait de rappel (px écran)

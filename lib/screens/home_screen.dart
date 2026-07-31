@@ -10,7 +10,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'ride_screen.dart';
 import 'ride_detail_screen.dart';
 import 'account_screen.dart';
-import 'settings_screen.dart';
 import '../services/altitude_reference_service.dart';
 import '../services/elevation_stats.dart';
 import '../services/interrupted_ride_service.dart';
@@ -85,6 +84,10 @@ const Map<String, Map<String, dynamic>> kPracticeTypes = {
 /// sortie entière (météo, notes, ville…) — moins de volume, et surtout moins
 /// d'exposition via le `share_code` partagé aux proches. La sortie complète vit
 /// dans la table `rides`.
+///
+/// Écrite à la FIN du ride. Pendant la sortie, `ride_json` ne porte que les
+/// waypoints, republiés à chaque modification (cf. `_pushLiveWaypoints` dans
+/// ride_screen.dart) ; la trace, elle, part en continu dans `safety_positions`.
 Map<String, dynamic> liveSessionRideJson(Map ride) => {
       'points': ride['points'],
       'waypoints': ride['waypoints'],
@@ -1349,17 +1352,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'Paramètres',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-            icon: const Icon(Icons.settings_outlined,
-                color: Colors.white70, size: 26),
-          ),
           IconButton(
             tooltip: 'Mon compte',
             onPressed: _openAccountScreen,

@@ -46,3 +46,8 @@ app.*.map.json
 
 # Scripts de migration one-shot (outils locaux, hors dépôt)
 /scripts/
+
+# Fiche SOS : donnees personnelles reelles (adresse, groupe sanguin, allergies,
+# proches). Le depot est public, ce fichier ne doit jamais y entrer.
+# Modele a copier : lib/models/sos_profile_local.example.dart
+/lib/models/sos_profile_local.dart

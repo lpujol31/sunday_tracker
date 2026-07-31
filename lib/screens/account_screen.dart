@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/account_service.dart';
+import 'settings_screen.dart';
 
 /// Écran « Mon compte » : sauvegarder ses sorties (rattacher un email au compte
 /// anonyme) ou se reconnecter à un compte existant après réinstallation.
@@ -122,6 +123,19 @@ class _AccountScreenState extends State<AccountScreen> {
         backgroundColor: _kBg,
         title: const Text('Mon compte'),
         elevation: 0,
+        actions: [
+          IconButton(
+            tooltip: 'Paramètres',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
+            icon: const Icon(Icons.settings_outlined, size: 26),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: SafeArea(
         // Défilable si le contenu dépasse (petit écran / clavier), tout en

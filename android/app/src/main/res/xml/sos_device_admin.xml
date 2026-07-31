@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Une seule politique demandée : force-lock (verrouiller l'écran).
+     Ne rien ajouter ici sans nécessité : chaque politique supplémentaire
+     s'affiche à l'utilisateur dans l'écran d'activation et l'inquiète. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+</device-admin>

@@ -12,6 +12,9 @@ import 'package:geocoding/geocoding.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
 import 'package:share_plus/share_plus.dart';
+// Profil SOS réel, hors dépôt (données personnelles). Absent d'un clone frais :
+// copier sos_profile_local.example.dart en sos_profile_local.dart.
+import '../models/sos_profile_local.dart';
 import '../services/altitude_reference_service.dart';
 import '../services/elevation_stats.dart';
 import '../services/photo_sync_service.dart';
@@ -29,6 +32,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'home_screen.dart';
+import 'sos_screen.dart';
 import 'dart:ui' as ui;
 
 // ── Bordure pointillée pour la zone Notifications ─────────────────
@@ -360,8 +364,8 @@ class _IsolatedMap extends StatelessWidget {
   /// Marker waypoint : pin flottant numéroté décalé perpendiculairement à la
   /// trace, relié par une fine ligne à un point posé sur sa vraie position GPS.
   Marker _waypointMarker(Map<String, dynamic> wp, int number) {
-    // Bleu = point mémorisé, orange = pause au bouton, orange + étincelle =
-    // pause détectée par le mode auto (cf. WaypointKind).
+    // Bleu pour tous les points de passage ; l'étincelle en puce au bord de la
+    // pastille = pause détectée par le mode auto (cf. WaypointKind).
     final kind = waypointKindOf(wp);
     final color = kind.color;
     const lead = 30.0;
@@ -2439,40 +2443,44 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
-  // Mention passive (non cliquable) sous les chips de pratique : résume en une
-  // ligne ce que la config fera des pauses pour cette sortie. L'adaptation se
+  // Phrase par pratique adaptable (préposition/élision correctes). Une pratique
+  // absente d'ici = pas d'adaptation spécifique → aucune mention.
+  static const Map<String, String> _kAdaptedPauseHint = {
+    'marche': 'Détection des pauses adaptée à la marche',
+    'running': 'Détection des pauses adaptée au running',
+    'route': 'Détection des pauses adaptée au vélo route',
+    'vtt': 'Détection des pauses adaptée au VTT',
+    'enduro': "Détection des pauses adaptée à l'enduro",
+  };
+
+  // Mention passive (non cliquable) sous les chips de pratique. Affichée
+  // UNIQUEMENT quand les seuils sont réellement calés sur la pratique choisie ;
+  // sinon rien (une ligne « standard » n'apprendrait rien). L'adaptation se
   // règle dans Paramètres — ici on informe, on n'agit pas.
   Widget _startSheetAutoPauseHint({
     required String? practice,
     required bool autoOn,
     required bool adapt,
   }) {
-    final IconData icon;
-    final String text;
-    if (!autoOn) {
-      icon = Icons.pause_circle_outline;
-      text = 'Détection auto des pauses désactivée';
-    } else if (adapt &&
-        practice != null &&
-        kAutoPauseProfiles.containsKey(practice)) {
-      final label = kPracticeTypes[practice]?['label'] as String? ?? practice;
-      icon = Icons.tune_rounded;
-      text = 'Pauses auto adaptées · $label';
-    } else {
-      icon = Icons.tune_rounded;
-      text = 'Pauses auto · réglage standard';
+    if (!autoOn || !adapt || practice == null) {
+      return const SizedBox.shrink();
     }
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: Colors.white38),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            text,
-            style: const TextStyle(fontSize: 12, color: Colors.white38),
+    final text = _kAdaptedPauseHint[practice];
+    if (text == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Row(
+        children: [
+          const Icon(Icons.tune_rounded, size: 14, color: Colors.white38),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 12, color: Colors.white38),
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -2553,7 +2561,6 @@ class _RideScreenState extends State<RideScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
               _startSheetAutoPauseHint(
                 practice: selectedPractice,
                 autoOn: autoPauseOn,
@@ -2886,6 +2893,7 @@ class _RideScreenState extends State<RideScreen> {
     final current = (wp['photos'] as List?) ?? const [];
     wp['photos'] = current.where((e) => !identical(e, entry)).toList();
     if (mounted) setState(() {});
+    _markLiveWaypointsDirty();
     // Nettoyage disque + Storage en arrière-plan (non bloquant).
     () async {
       if (local != null) { try { await File(local).delete(); } catch (_) {} }
@@ -2899,6 +2907,7 @@ class _RideScreenState extends State<RideScreen> {
     setState(() {
       rideWaypoints.removeWhere((e) => identical(e, wp));
     });
+    _markLiveWaypointsDirty();
     // Nettoyage disque + Storage en arrière-plan (non bloquant).
     () async {
       for (final entry in photos) {
@@ -2966,6 +2975,7 @@ class _RideScreenState extends State<RideScreen> {
                   onPressed: () {
                     wp['note'] = controller.text.trim();
                     if (mounted) setState(() {});
+                    _markLiveWaypointsDirty();
                     Navigator.of(ctx).pop();
                     refresh();
                   },
@@ -3019,6 +3029,7 @@ class _RideScreenState extends State<RideScreen> {
     current.add({'local': local, 'url': null});
     wp['photos'] = current;
     if (mounted) setState(() {});
+    _markLiveWaypointsDirty();
     refresh();
   }
 
@@ -3606,6 +3617,7 @@ class _RideScreenState extends State<RideScreen> {
                         'photos': photoEntries,
                       });
                     });
+                    _markLiveWaypointsDirty();
                     Navigator.of(modalContext).pop();
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Point mémorisé !')),
@@ -3658,9 +3670,57 @@ class _RideScreenState extends State<RideScreen> {
     }
   }
 
+  // Points de passage en attente de publication vers la session live, et push
+  // en vol (deux writes concurrents sur la même ligne s'écraseraient).
+  bool _liveWaypointsDirty = false;
+  bool _liveWaypointsPushing = false;
+
+  /// À appeler après TOUTE modification de [rideWaypoints] (ajout, suppression,
+  /// note, photos, pause posée ou reprise) : publie l'état courant vers le
+  /// viewer web, sans bloquer l'UI.
+  void _markLiveWaypointsDirty() {
+    _liveWaypointsDirty = true;
+    _pushLiveWaypoints();
+  }
+
+  /// Publie les points de passage dans `safety_sessions.ride_json` PENDANT la
+  /// sortie. Sans ça, les waypoints ne quittent le téléphone qu'au finish et les
+  /// proches suivent la trace sans voir un seul point de passage.
+  ///
+  /// Charge volontairement partielle — les waypoints, rien d'autre : la trace
+  /// part déjà dans `safety_positions`, et le viewer ne lit `points` et les
+  /// stats de `ride_json` que sur une session terminée. Le payload complet
+  /// (cf. `liveSessionRideJson`) écrase celui-ci à la fin du ride.
+  ///
+  /// Échec réseau (le cas normal en montagne) : le drapeau est reposé et le
+  /// timer de 15 s réessaie, comme la file des positions.
+  Future<void> _pushLiveWaypoints() async {
+    if (safetySessionId == null || !_liveWaypointsDirty) return;
+    if (_liveWaypointsPushing) return; // le tick de 15 s rattrapera
+    _liveWaypointsPushing = true;
+    // Drapeau baissé AVANT l'appel : un waypoint posé pendant l'upload le relève
+    // et repart au prochain tick, au lieu d'être avalé par ce push-ci.
+    _liveWaypointsDirty = false;
+    final snapshot = List<Map<String, dynamic>>.from(rideWaypoints);
+    try {
+      await Supabase.instance.client
+          .from('safety_sessions')
+          .update({
+            'ride_json': {'waypoints': snapshot},
+          })
+          .eq('id', safetySessionId!);
+    } catch (e) {
+      _liveWaypointsDirty = true;
+      debugPrint('[SAFETY] push waypoints failed: $e');
+    } finally {
+      _liveWaypointsPushing = false;
+    }
+  }
+
   void startSafetyUploadTimer() {
     safetyUploadTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
       await _flushUploadQueue();
+      await _pushLiveWaypoints();
     });
   }
 
@@ -4025,6 +4085,9 @@ class _RideScreenState extends State<RideScreen> {
       rideIsPaused = true;
       _addPauseWaypoint(_pauseStartTime!, auto: auto);
     });
+    // Le timer de 15 s vient d'être coupé : si ce push échoue, le point de pause
+    // ne partira qu'à la reprise (_exitPause repose le drapeau et relance).
+    _markLiveWaypointsDirty();
     if (safetySessionId != null) {
       await Supabase.instance.client
           .from('safety_sessions')
@@ -4070,6 +4133,10 @@ class _RideScreenState extends State<RideScreen> {
         _pauseWaypoint = null;
       }
     });
+    // `resumedAt` rend la pause datable côté web : sans ce push, une pause auto
+    // courte resterait affichée sur la carte du viewer (durée indéterminable,
+    // donc non masquée) alors que l'app l'a déjà escamotée.
+    _markLiveWaypointsDirty();
     if (safetySessionId != null) {
       await Supabase.instance.client
           .from('safety_sessions')
@@ -5868,7 +5935,7 @@ class _RideScreenState extends State<RideScreen> {
                 const SizedBox(width: 8),
                 // SOS (droite, compact)
                 GestureDetector(
-                  onTap: () {},
+                  onTap: _openSosCard,
                   child: Container(
                     width: 77,
                     decoration: BoxDecoration(
@@ -5898,6 +5965,29 @@ class _RideScreenState extends State<RideScreen> {
             ),
           ),
       ],
+    );
+  }
+
+  // ── SOS ────────────────────────────────────────────────────────
+  // Ouvre la fiche d'urgence plein écran. Test de l'affichage seul pour
+  // l'instant : pas encore d'envoi d'alerte aux proches ni de reprise sur
+  // l'écran verrouillé (Live Activity iOS / notification publique Android).
+  void _openSosCard() {
+    // L'heure du fix, pas l'heure d'ouverture : sur une chute en zone sans
+    // réseau l'écart entre les deux est précisément l'information utile.
+    final fixAt = currentPosition?.timestamp ?? _lastGpsUpdateTime;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => SosScreen(
+          profile: kSosProfileDemo,
+          latitude: currentPosition?.latitude,
+          longitude: currentPosition?.longitude,
+          lastFixAt: fixAt,
+          batteryLevel: _batteryLevel,
+          liveUrl: safetyUrl,
+        ),
+      ),
     );
   }
 

@@ -67,28 +67,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: _kAccent))
           : ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
               children: [
                 _sectionCard(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _sectionHeader(),
-                      const SizedBox(height: 20),
-                      _autoModeToggle(),
                       const SizedBox(height: 14),
+                      _autoModeToggle(),
+                      const SizedBox(height: 8),
                       const Text(
                         'Les pauses et reprises sont détectées automatiquement '
                         'pendant l\'enregistrement de votre sortie.',
                         style: TextStyle(
                           color: Colors.white54,
-                          fontSize: 13,
-                          height: 1.45,
+                          fontSize: 12.5,
+                          height: 1.35,
                         ),
                       ),
-                      const SizedBox(height: 18),
+                      const SizedBox(height: 12),
                       _adaptToPracticeToggle(),
-                      const SizedBox(height: 20),
+                      const SizedBox(height: 12),
                       _behaviorRow(
                         icon: Icons.pause_rounded,
                         color: const Color(0xFFF97316),
@@ -97,7 +97,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             'Le suivi se met automatiquement en pause dès que '
                             'vous vous arrêtez.',
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 10),
                       _behaviorRow(
                         icon: Icons.play_arrow_rounded,
                         color: const Color(0xFF8B5CF6),
@@ -106,7 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             'Le suivi reprend automatiquement dès que vous '
                             'repartez.',
                       ),
-                      const SizedBox(height: 18),
+                      const SizedBox(height: 12),
                       _infoFooter(),
                     ],
                   ),
@@ -118,7 +118,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _sectionCard({required Widget child}) {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: _kCard,
         borderRadius: BorderRadius.circular(20),
@@ -132,15 +132,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Row(
       children: [
         Container(
-          width: 44,
-          height: 44,
+          width: 40,
+          height: 40,
           decoration: BoxDecoration(
             color: _kAccent.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(14),
           ),
-          child: const Icon(Icons.settings, color: _kAccent, size: 22),
+          child: const Icon(Icons.settings, color: _kAccent, size: 20),
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 12),
         const Expanded(
           child: Text(
             'Enregistrement des sorties',
@@ -185,7 +185,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _adaptToPracticeToggle() {
     final dim = !_autoPause;
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(16),
@@ -193,16 +193,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Row(
         children: [
           Container(
-            width: 40,
-            height: 40,
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
               color: (dim ? Colors.grey : _kAccent).withValues(alpha: 0.16),
               shape: BoxShape.circle,
             ),
             child: Icon(Icons.tune_rounded,
-                color: dim ? Colors.grey : _kAccent, size: 22),
+                color: dim ? Colors.grey : _kAccent, size: 20),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -252,7 +252,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // on signale qu'elle est inactive.
     final dim = !_autoPause;
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(16),
@@ -261,15 +261,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 40,
-            height: 40,
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
               color: (dim ? Colors.grey : color).withValues(alpha: 0.16),
               shape: BoxShape.circle,
             ),
-            child: Icon(icon, color: dim ? Colors.grey : color, size: 22),
+            child: Icon(icon, color: dim ? Colors.grey : color, size: 20),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -301,7 +301,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _infoFooter() {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: const Color(0xFF14121A),
         borderRadius: BorderRadius.circular(14),

@@ -56,6 +56,20 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- SOS : administrateur d'appareil limité à `force-lock`, seul moyen
+             supporté pour que l'appli verrouille l'écran elle-même. L'activation
+             reste un choix explicite de l'utilisateur (Réglages système). -->
+        <receiver
+            android:name=".SosDeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/sos_device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
