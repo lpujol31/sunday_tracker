@@ -41,4 +41,29 @@ class RideSettingsService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kAdaptToPracticeKey, value);
   }
+
+  static const String _kResumeWatchKey = 'ride_resume_watch_enabled';
+
+  /// Valeur par défaut : le rattrapage de reprise est actif.
+  ///
+  /// Il est volontairement INDÉPENDANT du mode automatique : oublier de
+  /// reprendre est le seul oubli qui détruit des données (trace coupée,
+  /// position figée côté live et fiche SOS), et le rattrapage ne peut pas se
+  /// tromper au point de fausser une sortie — au pire il enregistre quelques
+  /// mètres de marche à l'arrêt, que la porte anti-gigue refuse de graver.
+  static const bool _kResumeWatchDefault = true;
+
+  /// Lit le rattrapage de reprise : pendant une pause manuelle, l'app garde une
+  /// veille GPS basse conso et relance l'enregistrement dès qu'on s'éloigne
+  /// franchement du point de pause.
+  static Future<bool> isResumeWatchEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_kResumeWatchKey) ?? _kResumeWatchDefault;
+  }
+
+  /// Active / désactive le rattrapage de reprise.
+  static Future<void> setResumeWatchEnabled(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kResumeWatchKey, value);
+  }
 }

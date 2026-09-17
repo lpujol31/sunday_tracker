@@ -44,8 +44,8 @@ class AutoPauseProfile {
 }
 
 /// Jeu générique : l'historique validé à vélo le 2026-07-21. Sert quand
-/// l'adaptation à la pratique est coupée, ou pour une pratique inconnue /
-/// « Auto » / « Autre ».
+/// l'adaptation à la pratique est coupée, pour « Autre », ou pour une pratique
+/// inconnue (sortie reprise après un crash).
 const AutoPauseProfile kGenericAutoPauseProfile = AutoPauseProfile(
   pauseSpeedKmh: 2.0,
   resumeSpeedKmh: 5.0,

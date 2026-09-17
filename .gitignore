@@ -51,3 +51,6 @@ app.*.map.json
 # proches). Le depot est public, ce fichier ne doit jamais y entrer.
 # Modele a copier : lib/models/sos_profile_local.example.dart
 /lib/models/sos_profile_local.dart
+
+# Cache du CLI Supabase (regenere a chaque commande, rien a versionner)
+/supabase/.temp/

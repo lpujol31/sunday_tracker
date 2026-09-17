@@ -21,6 +21,7 @@ const _kAccent = Color(0xFFFF8A00);
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoPause = true;
   bool _adaptToPractice = true;
+  bool _resumeWatch = true;
   bool _loading = true;
 
   @override
@@ -32,12 +33,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final enabled = await RideSettingsService.isAutoPauseEnabled();
     final adapt = await RideSettingsService.isAdaptToPracticeEnabled();
+    final resumeWatch = await RideSettingsService.isResumeWatchEnabled();
     if (!mounted) return;
     setState(() {
       _autoPause = enabled;
       _adaptToPractice = adapt;
+      _resumeWatch = resumeWatch;
       _loading = false;
     });
+  }
+
+  Future<void> _toggleResumeWatch(bool value) async {
+    setState(() => _resumeWatch = value);
+    await RideSettingsService.setResumeWatchEnabled(value);
   }
 
   Future<void> _toggleAutoPause(bool value) async {
@@ -111,8 +119,83 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(height: 14),
+                _sectionCard(child: _resumeWatchSection()),
               ],
             ),
+    );
+  }
+
+  /// Carte « Anti-oubli de reprise ». Volontairement séparée du mode
+  /// automatique : elle sert surtout à ceux qui gèrent leurs pauses à la main.
+  /// Oublier de reprendre est le seul oubli qui coûte cher — la trace s'arrête,
+  /// et le live comme la fiche SOS restent figés sur le lieu de la pause.
+  Widget _resumeWatchSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: const Color(0xFF22C55E).withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.notifications_active_outlined,
+                  color: Color(0xFF22C55E), size: 20),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Anti-oubli de reprise',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Switch(
+              value: _resumeWatch,
+              onChanged: _toggleResumeWatch,
+              activeThumbColor: Colors.white,
+              activeTrackColor: const Color(0xFF22C55E),
+              inactiveThumbColor: Colors.white,
+              inactiveTrackColor: const Color(0xFF3A3A3A),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'Pendant une pause manuelle, l\'appli garde un œil sur votre position. '
+          'Si vous repartez sans avoir repris, l\'enregistrement se relance seul '
+          'et vous prévient.',
+          style: TextStyle(color: Colors.white54, fontSize: 12.5, height: 1.35),
+        ),
+        const SizedBox(height: 12),
+        _behaviorRow(
+          icon: Icons.notifications_paused_outlined,
+          color: const Color(0xFFF97316),
+          title: 'Rappel vibré',
+          subtitle:
+              'La notification indique « EN PAUSE depuis X min » et vibre après '
+              '3, 10, 20 et 40 min, avec un bouton Reprendre.',
+          dimmed: false,
+        ),
+        const SizedBox(height: 10),
+        _behaviorRow(
+          icon: Icons.my_location,
+          color: const Color(0xFF22C55E),
+          title: 'Reprise rattrapée',
+          subtitle:
+              'Dès 60 m parcourus depuis le point de pause, l\'enregistrement '
+              'repart tout seul. La veille s\'arrête après 45 min de pause, et '
+              'en mode économie de batterie.',
+          dimmed: !_resumeWatch,
+        ),
+      ],
     );
   }
 
@@ -247,10 +330,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required Color color,
     required String title,
     required String subtitle,
+    bool? dimmed,
   }) {
-    // Grisé quand le mode auto est coupé : on garde l'explication visible mais
-    // on signale qu'elle est inactive.
-    final dim = !_autoPause;
+    // Grisé quand le réglage dont la ligne dépend est coupé : on garde
+    // l'explication visible mais on signale qu'elle est inactive. Par défaut la
+    // ligne suit le mode automatique ; [dimmed] permet de la rattacher à un
+    // autre réglage (carte anti-oubli).
+    final dim = dimmed ?? !_autoPause;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(

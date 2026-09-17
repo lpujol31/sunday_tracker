@@ -16,8 +16,10 @@ import 'package:share_plus/share_plus.dart';
 // copier sos_profile_local.example.dart en sos_profile_local.dart.
 import '../models/sos_profile_local.dart';
 import '../services/altitude_reference_service.dart';
+import '../services/background_service.dart' show kDefaultNotificationContent;
 import '../services/elevation_stats.dart';
 import '../services/photo_sync_service.dart';
+import '../services/ride_alerts_service.dart';
 import '../services/ride_settings_service.dart';
 import '../utils/auto_pause_profile.dart';
 import '../utils/date_labels.dart';
@@ -560,7 +562,9 @@ class _RideScreenState extends State<RideScreen> {
 
   /// Profil de seuils actif. Résolu à la volée (et non figé) pour suivre un
   /// changement de pratique via les chips en cours de sortie. Retombe sur le
-  /// jeu générique si l'adaptation est coupée ou la pratique inconnue / « Auto ».
+  /// jeu générique si l'adaptation est coupée, ou si la pratique est inconnue —
+  /// ce qui ne concerne plus qu'une sortie reprise après un crash, la grille de
+  /// démarrage imposant désormais un choix.
   AutoPauseProfile get _autoPauseProfile {
     if (!_adaptToPractice) return kGenericAutoPauseProfile;
     final key = _selectedPractice;
@@ -578,6 +582,45 @@ class _RideScreenState extends State<RideScreen> {
   DateTime? _movingSince; // depuis quand au-dessus du seuil de reprise
   LatLng? _autoPausePoint; // position de référence au moment de la pause auto
   LatLng? _lastFixPoint; // position du fix précédent (détection de déplacement)
+
+  // ── Rattrapage de reprise (pause MANUELLE) ────────────────────
+  // Des deux oublis possibles en mode manuel, un seul fait vraiment mal.
+  // Oublier la PAUSE ne fausse presque rien : la porte anti-gigue de
+  // `startTracking` refuse de graver les points immobiles, et l'écran de détail
+  // isole déjà ce temps en « arrêté ». Oublier la REPRISE, en revanche, coupe
+  // la trace — et laisse le live comme la fiche SOS figés sur le lieu de la
+  // pause, ce qui est un problème de sécurité, pas de statistiques.
+  //
+  // D'où ce filet, actif pendant les pauses manuelles :
+  //   • un rappel vibré + la notification permanente qui dit « EN PAUSE » ;
+  //   • une veille GPS volontairement grossière (un fix tous les ~25 m, en
+  //     précision réduite) qui ne grave rien et ne sert qu'à voir qu'on repart.
+  //
+  // La reprise, elle, s'applique d'office : c'est l'asymétrie qui rend tout ça
+  // sûr. Une fausse pause fausserait la sortie ; une fausse reprise n'ajoute
+  // que quelques mètres à l'arrêt, que l'anti-gigue refuse de graver.
+  bool _resumeWatchEnabled = true; // lu dans startRide()
+  StreamSubscription<Position>? _pauseWatchStream;
+  LatLng? _pauseWatchOrigin; // position au moment de la pause manuelle
+  Timer? _pauseAssistTimer; // rappels vibrés + texte de la notification
+  final Set<int> _pauseRemindersSent = {}; // paliers (min) déjà notifiés
+  String? _resumeBannerMessage; // bandeau cockpit après un rattrapage
+  Timer? _resumeBannerTimer; // efface le bandeau tout seul
+
+  /// Éloignement du point de pause qui vaut « il est reparti ». Large à
+  /// dessein (aller chercher un café à 30 m n'est pas une reprise), et comparé
+  /// à une DISTANCE, jamais à une vitesse : la vitesse du fused provider est
+  /// précisément le signal en lequel on a le moins confiance.
+  static const double _kResumeWatchMeters = 60;
+
+  /// Au-delà, ce n'est plus un oubli mais une vraie halte (déjeuner, visite) :
+  /// on coupe la veille pour ne pas grignoter la batterie tout l'après-midi.
+  static const Duration _kPauseWatchMaxAge = Duration(minutes: 45);
+
+  /// Minutes de pause auxquelles le rappel vibre. Espacement croissant : le
+  /// premier palier suffit presque toujours, les suivants ne doivent pas
+  /// tourner au harcèlement pendant une vraie halte.
+  static const List<int> _kPauseReminderMinutes = [3, 10, 20, 40];
 
   // ── Nom & note personnalisés ───────────────────────────────────
   String? _customRideName;
@@ -2218,6 +2261,10 @@ class _RideScreenState extends State<RideScreen> {
     // L'adaptation à la pratique, elle, est relue via le profil à chaque tick :
     // on fige juste la préférence utilisateur au démarrage.
     _adaptToPractice = await RideSettingsService.isAdaptToPracticeEnabled();
+    // Rattrapage de reprise : indépendant du mode automatique, et utile
+    // précisément quand celui-ci est coupé (pauses gérées à la main).
+    _resumeWatchEnabled = await RideSettingsService.isResumeWatchEnabled();
+    if (_resumeWatchEnabled) RideAlertsService.ensurePermission();
     _lastMovingAt = DateTime.now();
     _lastFixPoint = null;
     _autoPauseArmed = false;
@@ -2259,76 +2306,6 @@ class _RideScreenState extends State<RideScreen> {
       .add(_pausedTotal)
       .add(rideDuration);
 
-  /// Une option de l'écran « Démarrer la sortie ».
-  /// [primary] = true → style vert primaire (dernier choix mémorisé) ;
-  /// false → style sombre secondaire.
-  Widget _buildStartOption({
-    required bool primary,
-    required Color accent,
-    required IconData icon,
-    required double iconSize,
-    required String title,
-    required String subtitle,
-    required bool loading,
-    required VoidCallback onTap,
-  }) {
-    return Opacity(
-      opacity: loading ? 0.4 : 1.0,
-      child: GestureDetector(
-        onTap: loading ? null : onTap,
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            gradient: primary
-                ? const LinearGradient(
-                    colors: [Color(0xFF00C853), Color(0xFF00897B)],
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                  )
-                : null,
-            color: primary ? null : const Color(0xFF2A2A2A),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 36, height: 36,
-                decoration: BoxDecoration(
-                  color: primary
-                      ? Colors.white.withValues(alpha: 0.2)
-                      : accent.withValues(alpha: 0.15),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(icon,
-                    color: primary ? Colors.white : accent, size: iconSize),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white)),
-                    Text(subtitle,
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: primary ? Colors.white70 : Colors.white54)),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right,
-                  color: primary ? Colors.white54 : Colors.white24),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _practiceChip({
     required String label,
     required IconData icon,
@@ -2368,19 +2345,18 @@ class _RideScreenState extends State<RideScreen> {
         ),
       );
 
-  Future<void> _saveLastPractice(String? key, SharedPreferences prefs) async {
-    if (key == null) {
-      await prefs.remove(_prefKeyLastPractice);
-    } else {
-      await prefs.setString(_prefKeyLastPractice, key);
-    }
+  Future<void> _saveLastPractice(String key, SharedPreferences prefs) async {
+    await prefs.setString(_prefKeyLastPractice, key);
   }
 
-  // Métadonnées d'affichage de la pratique courante (null = détection auto).
+  // Métadonnées d'affichage de la pratique courante. Toute sortie démarrée
+  // depuis cet écran en a une (c'est la tuile de pratique qui lance la sortie) ;
+  // le repli ne sert qu'aux sorties reprises après un crash, enregistrées avant
+  // que la pratique ne soit obligatoire.
   (String, IconData, Color) _practiceMeta() {
     final key = _selectedPractice;
     final t = key != null ? kPracticeTypes[key] : null;
-    if (t == null) return ('Auto', Icons.auto_awesome, Colors.white70);
+    if (t == null) return ('Pratique', Icons.tune_rounded, Colors.white70);
     return (t['label'] as String, t['icon'] as IconData, t['color'] as Color);
   }
 
@@ -2404,24 +2380,13 @@ class _RideScreenState extends State<RideScreen> {
             const Text('Pratique',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
             const SizedBox(height: 4),
-            const Text('Auto = détection automatique à la fin de la sortie.',
+            const Text('Cale les seuils de détection des pauses.',
               style: TextStyle(fontSize: 13, color: Colors.white54)),
             const SizedBox(height: 16),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                _practiceChip(
-                  label: 'Auto',
-                  icon: Icons.auto_awesome,
-                  color: Colors.white70,
-                  selected: _selectedPractice == null,
-                  onTap: () async {
-                    setState(() => _selectedPractice = null);
-                    await _saveLastPractice(null, prefs);
-                    if (mounted) Navigator.pop(ctx);
-                  },
-                ),
                 ...kPracticeTypes.entries.map(
                   (e) => _practiceChip(
                     label: e.value['label'] as String,
@@ -2443,42 +2408,100 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
-  // Phrase par pratique adaptable (préposition/élision correctes). Une pratique
-  // absente d'ici = pas d'adaptation spécifique → aucune mention.
-  static const Map<String, String> _kAdaptedPauseHint = {
-    'marche': 'Détection des pauses adaptée à la marche',
-    'running': 'Détection des pauses adaptée au running',
-    'route': 'Détection des pauses adaptée au vélo route',
-    'vtt': 'Détection des pauses adaptée au VTT',
-    'enduro': "Détection des pauses adaptée à l'enduro",
-  };
-
-  // Mention passive (non cliquable) sous les chips de pratique. Affichée
+  // Mention passive (non cliquable) sous les tuiles de pratique. Affichée
   // UNIQUEMENT quand les seuils sont réellement calés sur la pratique choisie ;
   // sinon rien (une ligne « standard » n'apprendrait rien). L'adaptation se
   // règle dans Paramètres — ici on informe, on n'agit pas.
-  Widget _startSheetAutoPauseHint({
-    required String? practice,
-    required bool autoOn,
-    required bool adapt,
-  }) {
-    if (!autoOn || !adapt || practice == null) {
-      return const SizedBox.shrink();
-    }
-    final text = _kAdaptedPauseHint[practice];
-    if (text == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
+  Widget _startSheetAutoPauseHint({required bool autoOn, required bool adapt}) {
+    if (!autoOn || !adapt) return const SizedBox.shrink();
+    return const Padding(
+      padding: EdgeInsets.only(top: 14),
       child: Row(
         children: [
-          const Icon(Icons.tune_rounded, size: 14, color: Colors.white38),
-          const SizedBox(width: 6),
+          Icon(Icons.tune_rounded, size: 14, color: Colors.white38),
+          SizedBox(width: 6),
           Expanded(
             child: Text(
-              text,
-              style: const TextStyle(fontSize: 12, color: Colors.white38),
+              'Les seuils de détection des pauses se calent sur la pratique choisie',
+              style: TextStyle(fontSize: 12, color: Colors.white38),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// Tuile de pratique de l'écran de démarrage. C'est ELLE qui lance la sortie :
+  /// il n'y a plus de bouton « Démarrer » séparé, donc plus moyen de partir sans
+  /// avoir dit sa pratique — ce qui compte, car les seuils de pause auto en
+  /// dépendent dès la première seconde (cf. auto_pause_profile.dart).
+  /// [isLast] met en avant la dernière pratique utilisée : le geste devient un
+  /// réflexe pour qui fait toujours la même chose.
+  Widget _practiceTile({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required bool isLast,
+    required VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.topCenter,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
+            decoration: BoxDecoration(
+              color: isLast
+                  ? Color.alphaBlend(
+                      color.withValues(alpha: 0.16), const Color(0xFF2A2A2A))
+                  : const Color(0xFF2A2A2A),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isLast ? color.withValues(alpha: 0.55) : Colors.transparent,
+                width: 1.5,
+              ),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 26, color: color),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: isLast ? Colors.white : Colors.white70,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (isLast)
+            Positioned(
+              top: -7,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Text(
+                  'DERNIÈRE FOIS',
+                  style: TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.4,
+                    height: 1.2,
+                    color: Color(0xFF0B0B0B),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -2487,12 +2510,13 @@ class _RideScreenState extends State<RideScreen> {
   Future<void> _showStartRideSheet() async {
     bool loading = false;
     final prefs = await SharedPreferences.getInstance();
-    // Dernière pratique choisie (mémorisée entre sessions ; null = Auto).
-    String? selectedPractice =
+    // Dernière pratique utilisée : simplement mise en avant dans la grille
+    // (elle n'est PAS pré-sélectionnée — c'est le tap qui démarre la sortie).
+    final String? lastPractice =
         _selectedPractice ?? prefs.getString(_prefKeyLastPractice);
-    // Dernier choix mémorisé : true = « Partager et démarrer » (défaut).
-    final bool sharePrimary = prefs.getBool(_prefKeyLastShare) ?? true;
-    // Réglages qui pilotent la mention passive sous les chips (cf. Paramètres).
+    // Partage du lien de suivi : case à cocher, dernier état mémorisé.
+    bool shareLink = prefs.getBool(_prefKeyLastShare) ?? true;
+    // Réglages qui pilotent la mention passive sous les tuiles (cf. Paramètres).
     final bool autoPauseOn = await RideSettingsService.isAutoPauseEnabled();
     final bool adaptToPractice =
         await RideSettingsService.isAdaptToPracticeEnabled();
@@ -2529,78 +2553,106 @@ class _RideScreenState extends State<RideScreen> {
               ),
               const SizedBox(height: 6),
               const Text(
-                'Veux-tu partager ton lien de suivi ?',
+                'Choisis ta pratique : la sortie démarre aussitôt.',
                 style: TextStyle(fontSize: 14, color: Colors.white54),
+              ),
+              const SizedBox(height: 18),
+              // Partage du lien de suivi : une case à cocher, et non plus une
+              // branche de démarrage. La question du partage ne doit pas être
+              // ce qui décide de la façon dont on part.
+              GestureDetector(
+                onTap: loading
+                    ? null
+                    : () => setSheetState(() => shareLink = !shareLink),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2A2A2A),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: 30, height: 30,
+                        decoration: BoxDecoration(
+                          color: shareLink
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFF3A3A3A),
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                        child: shareLink
+                            ? const Icon(Icons.check, color: Colors.white, size: 20)
+                            : null,
+                      ),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Partager mon lien de suivi',
+                              style: TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
+                            SizedBox(height: 2),
+                            Text('Tes proches voient ta position en direct',
+                              style: TextStyle(fontSize: 12, color: Colors.white54)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
               const SizedBox(height: 20),
               const Text(
-                'Pratique',
+                'Je pars en…',
                 style: TextStyle(fontSize: 14, color: Colors.white54),
               ),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _practiceChip(
-                    label: 'Auto',
-                    icon: Icons.auto_awesome,
-                    color: Colors.white70,
-                    selected: selectedPractice == null,
-                    onTap: () => setSheetState(() => selectedPractice = null),
-                  ),
-                  ...kPracticeTypes.entries.map(
-                    (e) => _practiceChip(
-                      label: e.value['label'] as String,
-                      icon: e.value['icon'] as IconData,
-                      color: e.value['color'] as Color,
-                      selected: selectedPractice == e.key,
-                      onTap: () =>
-                          setSheetState(() => selectedPractice = e.key),
+              const SizedBox(height: 14),
+              // Grille de pratiques : chaque tuile DÉMARRE la sortie. Pas de
+              // pré-sélection, pas de bouton de repli — le choix et le départ
+              // sont le même geste, donc la pratique ne peut plus être oubliée.
+              LayoutBuilder(
+                builder: (lbCtx, constraints) {
+                  const gap = 8.0;
+                  final tileW = (constraints.maxWidth - gap * 2) / 3;
+                  return Opacity(
+                    opacity: loading ? 0.4 : 1,
+                    child: Wrap(
+                      spacing: gap,
+                      runSpacing: 14,
+                      children: [
+                        for (final e in kPracticeTypes.entries)
+                          SizedBox(
+                            width: tileW,
+                            child: _practiceTile(
+                              label: e.value['label'] as String,
+                              icon: e.value['icon'] as IconData,
+                              color: e.value['color'] as Color,
+                              isLast: e.key == lastPractice,
+                              onTap: loading
+                                  ? null
+                                  : () async {
+                                      setSheetState(() => loading = true);
+                                      HapticFeedback.selectionClick();
+                                      _selectedPractice = e.key;
+                                      await _saveLastPractice(e.key, prefs);
+                                      await prefs.setBool(
+                                          _prefKeyLastShare, shareLink);
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                      if (!mounted) return;
+                                      await startRide(shareLink: shareLink);
+                                    },
+                            ),
+                          ),
+                      ],
                     ),
-                  ),
-                ],
+                  );
+                },
               ),
               _startSheetAutoPauseHint(
-                practice: selectedPractice,
                 autoOn: autoPauseOn,
                 adapt: adaptToPractice,
-              ),
-              const SizedBox(height: 20),
-              _buildStartOption(
-                primary: sharePrimary,
-                accent: const Color(0xFF00C853),
-                icon: Icons.share_location,
-                iconSize: 18,
-                title: 'Partager et démarrer',
-                subtitle: 'Envoie le lien de suivi à tes proches',
-                loading: loading,
-                onTap: () async {
-                  setSheetState(() => loading = true);
-                  _selectedPractice = selectedPractice;
-                  await _saveLastPractice(selectedPractice, prefs);
-                  Navigator.pop(ctx);
-                  await prefs.setBool(_prefKeyLastShare, true);
-                  await startRide(shareLink: true);
-                },
-              ),
-              const SizedBox(height: 10),
-              _buildStartOption(
-                primary: !sharePrimary,
-                accent: Colors.blue,
-                icon: Icons.play_arrow_rounded,
-                iconSize: 20,
-                title: 'Démarrer sans partager',
-                subtitle: "Le lien reste dispo dans l'écran ride",
-                loading: loading,
-                onTap: () async {
-                  setSheetState(() => loading = true);
-                  _selectedPractice = selectedPractice;
-                  await _saveLastPractice(selectedPractice, prefs);
-                  Navigator.pop(ctx);
-                  await prefs.setBool(_prefKeyLastShare, false);
-                  await startRide(shareLink: false);
-                },
               ),
             ],
           ),
@@ -2711,7 +2763,20 @@ class _RideScreenState extends State<RideScreen> {
         setState(() => _batteryBannerMessage =
             'Batterie critique — sauvegarde automatique de la sortie…');
       }
-      await saveRide(); // affiche son dialog de progression puis quitte l'écran
+      final nav = Navigator.of(context);
+      await saveRide();
+      // Retour à l'accueil, exactement comme le bouton STOP. Sans ce popUntil,
+      // le `Navigator.pop()` final de saveRide ne referme que son propre dialog
+      // de progression : l'écran de ride restait ouvert et la sortie CONTINUAIT
+      // après avoir été sauvegardée — flux GPS toujours vif, mais
+      // `_currentRideBox` déjà vidée puis mise à null, donc plus le moindre
+      // filet de récupération. Constaté le 2026-08-02 (Salagou) : sortie
+      // enregistrée à 15h38 avec 230 points, 156 points de plus montés sur le
+      // serveur jusqu'à 16h02 (extinction à 5 %), et une reprise de pause qui a
+      // rebasculé la session en `in_progress` alors qu'elle était `finished`.
+      // Quitter l'écran suffit à tout couper : dispose() annule le flux GPS,
+      // les timers et le service de premier plan.
+      if (mounted) nav.popUntil((route) => route.isFirst);
       return;
     }
 
@@ -2741,6 +2806,9 @@ class _RideScreenState extends State<RideScreen> {
     if (_lowPowerMode) return;
     _lowPowerMode = true;
     WakelockPlus.disable();
+    // La veille de reprise est un confort : elle passe après la survie de la
+    // sortie. Les rappels vibrés, eux, restent (ils ne coûtent rien).
+    _stopPauseWatch();
     // Re-souscrit le flux GPS avec les réglages éco (lus dans startTracking).
     // On garde le flux actif aussi pendant une pause AUTO : sans lui, la reprise
     // ne serait plus détectée et la sortie resterait bloquée en pause.
@@ -2769,6 +2837,9 @@ class _RideScreenState extends State<RideScreen> {
     _loadMapStyle();
     _loadBlockPrefs();
     _loadBannerPosition();
+    // Le bouton « Reprendre » des rappels de pause tape directement ici.
+    RideAlertsService.onResumeRequested = _onResumeRequestedFromNotification;
+    RideAlertsService.init();
     initializeGps();
   }
 
@@ -2776,6 +2847,11 @@ class _RideScreenState extends State<RideScreen> {
   void dispose() {
     positionStream?.cancel();
     gpsInitializationStream?.cancel();
+    _pauseWatchStream?.cancel();
+    _pauseAssistTimer?.cancel();
+    _resumeBannerTimer?.cancel();
+    RideAlertsService.onResumeRequested = null;
+    RideAlertsService.cancelAll();
     rideTimer?.cancel();
     _batteryTimer?.cancel();
     _sunTimer?.cancel();
@@ -3727,6 +3803,15 @@ class _RideScreenState extends State<RideScreen> {
   Future<void> createSafetySession() async {
     final shareCode = generateShareCode();
     final userId = Supabase.instance.client.auth.currentUser?.id;
+    // Filet crash-safety ouvert AVANT l'appel réseau : c'est le seul endroit où
+    // la box `current_ride` est ouverte et vidée. Si l'insert ci-dessous échoue
+    // (hors-ligne, jeton anonyme expiré), l'exception remonte jusqu'à
+    // startRide() — la box resterait alors fermée, donc ni vidée ni alimentée :
+    // la sortie roulerait sans filet ET les points d'une sortie précédemment
+    // tuée survivraient pour ressortir en « sortie interrompue » des jours plus
+    // tard. Ouvrir d'abord rend la récupération indépendante du réseau.
+    _currentRideBox = await Hive.openBox('current_ride');
+    await _currentRideBox!.clear();
     final response = await Supabase.instance.client
         .from('safety_sessions')
         .insert({
@@ -3739,8 +3824,6 @@ class _RideScreenState extends State<RideScreen> {
     safetySessionId = response['id'];
     safetyShareCode = shareCode;
     safetyUrl = 'https://sunday-tracker-live.web.app/?code=$safetyShareCode';
-    _currentRideBox = await Hive.openBox('current_ride');
-    await _currentRideBox!.clear();
     startSafetyUploadTimer();
   }
 
@@ -4085,6 +4168,10 @@ class _RideScreenState extends State<RideScreen> {
       rideIsPaused = true;
       _addPauseWaypoint(_pauseStartTime!, auto: auto);
     });
+    // Filet anti-oubli : uniquement sur pause manuelle. Une pause AUTO garde
+    // déjà le flux GPS complet et se reprend toute seule — elle n'a besoin ni
+    // de veille ni de rappel.
+    if (!auto) _startPauseAssist();
     // Le timer de 15 s vient d'être coupé : si ce push échoue, le point de pause
     // ne partira qu'à la reprise (_exitPause repose le drapeau et relance).
     _markLiveWaypointsDirty();
@@ -4097,18 +4184,33 @@ class _RideScreenState extends State<RideScreen> {
   }
 
   /// Sortie de pause, manuelle ou automatique.
-  Future<void> _exitPause() async {
+  ///
+  /// [resumeWasCaughtUp] = la reprise vient du rattrapage (la veille a vu qu'on
+  /// était reparti), pas d'un appui : le point de passage le dit, pour qu'on
+  /// puisse relire sa sortie sans se demander d'où sort cette reprise.
+  Future<void> _exitPause({bool resumeWasCaughtUp = false}) async {
     // Coupe la re-détection pendant la transition (des events du flux encore
     // vivant après une pause auto ne doivent pas relancer _exitPause).
     _autoPausedByApp = false;
+    _stopPauseAssist();
     // Repart avec un crédit de mouvement plein, sinon le tick 1 s remettrait en
     // pause immédiatement (aucune position reçue depuis la reprise).
     _lastMovingAt = DateTime.now();
     _lastFixPoint = null;
     _movingSince = null;
     _autoPausePoint = null;
-    if (_pauseStartTime != null) {
-      _pausedTotal += DateTime.now().difference(_pauseStartTime!);
+    // Intervalle consommé UNE seule fois. `_pauseStartTime` n'était jamais
+    // remis à null : tout second passage ici ré-additionnait le même intervalle
+    // dans `_pausedTotal`. Et un second passage est atteignable, parce que
+    // `rideIsPaused` ne retombe qu'après les await ci-dessous (annulation puis
+    // resouscription du flux GPS) — le bouton affiche donc encore « Reprise »
+    // pendant toute la transition, et un double appui compte la pause deux fois.
+    // Constaté le 2026-08-10 : 323 s de pauses réelles (waypoints) déclarées
+    // 414 s, donc 91 s de chrono volées à la sortie.
+    final pausedFrom = _pauseStartTime;
+    _pauseStartTime = null;
+    if (pausedFrom != null) {
+      _pausedTotal += DateTime.now().difference(pausedFrom);
     }
     _startRideTimer();
     // Repart d'un flux propre : après une pause auto l'ancien flux est encore
@@ -4124,7 +4226,9 @@ class _RideScreenState extends State<RideScreen> {
       if (wp != null) {
         final now = DateTime.now();
         final note = (wp['note'] ?? '').toString().trim();
-        final reprise = 'Reprise ${_hhmmss(now)}';
+        final reprise = resumeWasCaughtUp
+            ? 'Reprise rattrapée ${_hhmmss(now)}'
+            : 'Reprise ${_hhmmss(now)}';
         wp['note'] = note.isEmpty ? reprise : '$note · $reprise';
         // Heure de reprise en clair (même fuseau que `timestamp`) : rend la durée
         // de la pause exploitable pour masquer les pauses très courtes sur la
@@ -4133,6 +4237,7 @@ class _RideScreenState extends State<RideScreen> {
         _pauseWaypoint = null;
       }
     });
+    _pushNotificationState();
     // `resumedAt` rend la pause datable côté web : sans ce push, une pause auto
     // courte resterait affichée sur la carte du viewer (durée indéterminable,
     // donc non masquée) alors que l'app l'a déjà escamotée.
@@ -4143,6 +4248,138 @@ class _RideScreenState extends State<RideScreen> {
           .update({'status': 'in_progress'})
           .eq('id', safetySessionId!);
     }
+  }
+
+  // ── Rattrapage de reprise ──────────────────────────────────────
+
+  Duration _pauseAge() => _pauseStartTime == null
+      ? Duration.zero
+      : DateTime.now().difference(_pauseStartTime!);
+
+  /// « 12 min », « 1 h 05 » — lisible d'un coup d'œil sur l'écran verrouillé.
+  String _fmtPauseAge(Duration d) => d.inHours >= 1
+      ? '${d.inHours} h ${(d.inMinutes % 60).toString().padLeft(2, '0')}'
+      : '${d.inMinutes} min';
+
+  /// Met la notification permanente au diapason de l'état réel. Elle affichait
+  /// « Sortie en cours — tracking GPS actif » même en pause, c'est-à-dire
+  /// l'inverse de la vérité au moment précis où ça compte.
+  void _pushNotificationState() {
+    if (!rideIsStarted) return;
+    FlutterBackgroundService().invoke('updateNotification', {
+      'title': 'Sunday Tracker',
+      'content': rideIsPaused
+          ? '⏸ EN PAUSE depuis ${_fmtPauseAge(_pauseAge())} — pense à reprendre'
+          : kDefaultNotificationContent,
+    });
+  }
+
+  /// Arme le filet anti-oubli d'une pause manuelle : notification qui dit
+  /// « EN PAUSE », rappels vibrés aux paliers, et veille GPS de reprise.
+  void _startPauseAssist() {
+    _pauseRemindersSent.clear();
+    _pushNotificationState();
+    _pauseAssistTimer?.cancel();
+    // 20 s : assez fin pour que le compteur de la notification reste crédible,
+    // assez lâche pour ne rien coûter.
+    _pauseAssistTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (!mounted || !rideIsPaused) return;
+      final age = _pauseAge();
+      _pushNotificationState();
+      for (final m in _kPauseReminderMinutes) {
+        if (age.inMinutes >= m && _pauseRemindersSent.add(m)) {
+          RideAlertsService.showPauseReminder(age);
+          break;
+        }
+      }
+      // Pause qui s'installe : ce n'est plus un oubli, on rend la batterie.
+      // Les rappels, eux, continuent — ils ne coûtent rien.
+      if (age >= _kPauseWatchMaxAge) _stopPauseWatch();
+    });
+    _startPauseWatch();
+  }
+
+  /// Veille GPS basse conso pendant une pause manuelle. Elle ne grave rien, ne
+  /// remplit ni la trace ni la file d'upload : elle ne répond qu'à une seule
+  /// question — est-ce qu'on s'est éloigné du point de pause ?
+  Future<void> _startPauseWatch() async {
+    if (!_resumeWatchEnabled) return;
+    // Mode éco / batterie basse : la sauvegarde de la sortie passe avant le
+    // confort d'un rattrapage.
+    if (_lowPowerMode || (_batteryLevel ?? 100) <= _kBatteryCritical) return;
+    final origin = currentPosition != null
+        ? LatLng(currentPosition!.latitude, currentPosition!.longitude)
+        : (ridePoints.isNotEmpty ? ridePoints.last : null);
+    if (origin == null) return; // aucun fix connu : rien à quoi se comparer
+    _pauseWatchOrigin = origin;
+    await _pauseWatchStream?.cancel();
+    _pauseWatchStream =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            distanceFilter: 25,
+          ),
+        ).listen((position) {
+          if (!rideIsPaused || _autoPausedByApp) return;
+          final ref = _pauseWatchOrigin;
+          if (ref == null) return;
+          // Un fix imprécis peut « sauter » de plusieurs dizaines de mètres sans
+          // qu'on ait bougé d'un pouce : il ne doit pas valoir reprise.
+          if (position.accuracy > 30) return;
+          final moved = distanceCalculator.as(
+            LengthUnit.Meter,
+            ref,
+            LatLng(position.latitude, position.longitude),
+          );
+          if (moved >= _kResumeWatchMeters) _onResumeDetected(moved);
+        });
+  }
+
+  void _stopPauseWatch() {
+    _pauseWatchStream?.cancel();
+    _pauseWatchStream = null;
+    _pauseWatchOrigin = null;
+  }
+
+  /// Désarme tout le filet (reprise, arrêt de la sortie, sortie de l'écran).
+  void _stopPauseAssist() {
+    _pauseAssistTimer?.cancel();
+    _pauseAssistTimer = null;
+    _pauseRemindersSent.clear();
+    _stopPauseWatch();
+    RideAlertsService.cancelPauseReminder();
+  }
+
+  /// La veille a vu qu'on était reparti : on relance l'enregistrement sans rien
+  /// demander, et on le fait savoir (vibration longue + notification + bandeau).
+  /// Ne rien demander est le choix central : une confirmation qu'on ne voit pas
+  /// (téléphone en poche, gants) laisserait la sortie coupée, ce qu'on cherche
+  /// justement à éviter. Le bandeau permet de remettre en pause d'un geste.
+  Future<void> _onResumeDetected(double movedMeters) async {
+    if (!rideIsPaused || _autoPausedByApp) return;
+    // Avant _exitPause : plus aucun event de la veille ne doit repasser ici.
+    _stopPauseWatch();
+    final pausedFor = _fmtPauseAge(_pauseAge());
+    HapticFeedback.heavyImpact();
+    RideAlertsService.showResumeNotice();
+    await _exitPause(resumeWasCaughtUp: true);
+    if (!mounted) return;
+    setState(() => _resumeBannerMessage =
+        'Tu es reparti (${movedMeters.round()} m) — enregistrement repris '
+        'après $pausedFor de pause.');
+    // Le bandeau recouvre la barre du haut : il s'efface tout seul, le temps
+    // d'être vu et de pouvoir corriger si c'était une fausse alerte.
+    _resumeBannerTimer?.cancel();
+    _resumeBannerTimer = Timer(const Duration(seconds: 45), () {
+      if (mounted) setState(() => _resumeBannerMessage = null);
+    });
+  }
+
+  /// Bouton « Reprendre » du rappel de pause. La réponse arrive dans l'isolate
+  /// UI, celui où vit cet écran : on peut reprendre directement.
+  void _onResumeRequestedFromNotification() {
+    if (!mounted || !rideIsStarted || !rideIsPaused) return;
+    _exitPause();
   }
 
   void _syncRideToSupabase(Map<String, dynamic> ride) async {
@@ -4165,6 +4402,10 @@ class _RideScreenState extends State<RideScreen> {
     _batteryTimer = null;
     safetyUploadTimer?.cancel();
     safetyUploadTimer = null;
+    // Une sortie qu'on termine depuis une pause ne doit pas laisser traîner son
+    // rappel « pense à reprendre ».
+    _stopPauseAssist();
+    RideAlertsService.cancelAll();
 
     // Garantit que la dernière position connue termine le tracé, même si la
     // porte anti-gigue a filtré les derniers points (arrêt en fin de sortie).
@@ -4343,10 +4584,16 @@ class _RideScreenState extends State<RideScreen> {
     positionStream =
         Geolocator.getPositionStream(
           locationSettings: LocationSettings(
-            // Mode éco (batterie basse) : précision réduite et filtre de distance
-            // élargi → moins de fixes, donc moins de conso. Le tracé reste correct.
-            accuracy:
-                _lowPowerMode ? LocationAccuracy.medium : LocationAccuracy.high,
+            // Mode éco (batterie basse) : on économise en ESPAÇANT les fixes
+            // (distanceFilter), jamais en dégradant la précision demandée.
+            // `LocationAccuracy.medium` = PRIORITY_BALANCED_POWER_ACCURACY côté
+            // Android, soit 50-100 m annoncés — or la porte anti-imprécision
+            // quelques lignes plus bas (`accuracy > 20` → point rejeté) les
+            // jetait alors tous : la trace mourait en silence, sans pause, sans
+            // message. Constaté le 2026-08-10 (jogging baie de Canche) : passage
+            // sous 10 % à 17:00:50, puis 686 m de ligne droite en 6 min 40. Le
+            // mode éco n'y avait même rien gagné (2,5 min/% avant, 2,2 après).
+            accuracy: LocationAccuracy.high,
             distanceFilter: kDebugMode ? 0 : (_lowPowerMode ? 15 : 5),
           ),
         ).listen((Position position) {
@@ -6322,6 +6569,86 @@ class _RideScreenState extends State<RideScreen> {
     );
   }
 
+  /// Bandeau « l'enregistrement a repris tout seul », après un rattrapage de
+  /// reprise. Il porte son propre correctif : si c'était une fausse alerte
+  /// (on s'est éloigné à pied du point de pause sans repartir), « Remettre en
+  /// pause » annule le rattrapage d'un geste.
+  Widget _buildResumeBanner(double top) {
+    return Positioned(
+      top: top,
+      left: 16,
+      right: 16,
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
+          decoration: BoxDecoration(
+            color: const Color(0xFF15803D),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.4),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.play_arrow_rounded,
+                  color: Colors.white, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _resumeBannerMessage!,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        height: 1.25,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    GestureDetector(
+                      onTap: () async {
+                        _resumeBannerTimer?.cancel();
+                        setState(() => _resumeBannerMessage = null);
+                        if (!rideIsPaused) await _enterPause(auto: false);
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: const Text(
+                        'Remettre en pause',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          decoration: TextDecoration.underline,
+                          decorationColor: Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () {
+                  _resumeBannerTimer?.cancel();
+                  setState(() => _resumeBannerMessage = null);
+                },
+                child: const Icon(Icons.close_rounded,
+                    color: Colors.white70, size: 18),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final safeTop = MediaQuery.of(context).padding.top;
@@ -6594,6 +6921,12 @@ class _RideScreenState extends State<RideScreen> {
           // Bandeau d'alerte batterie (avertissement / critique / sauvegarde).
           if (rideIsStarted && _batteryBannerMessage != null)
             _buildBatteryBanner(safeTop),
+
+          // Bandeau de reprise rattrapée — décalé sous celui de la batterie
+          // quand les deux sont là (rare, mais ils se recouvriraient).
+          if (rideIsStarted && _resumeBannerMessage != null)
+            _buildResumeBanner(
+                safeTop + 12 + (_batteryBannerMessage != null ? 62 : 0)),
 
           // Cheat code debug GPS : 5 taps dans le coin haut-gauche.
           _buildDebugOverlay(),
